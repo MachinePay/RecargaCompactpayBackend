@@ -342,3 +342,13 @@ def test_diagnostico_mostra_tentativa_recusada_conexao_e_mensagens(client):
 
     client.get("/qualquer-coisa")
     assert client.get(f"/api/v1/admin/diagnostico/eventos?desde={ultimo}", headers=ADMIN).json()[0]["tipo"] == "http"
+
+
+def test_respostas_ocpp_saem_em_json_compacto(client):
+    # Firmware do JST-901 nao entende JSON com espaco depois de ":" e ",".
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-COMPACTO", "nome_local": "x"}, headers=ADMIN)
+    with client.websocket_connect("/CP-COMPACTO") as ws:
+        ws.send_text('[2,"1","BootNotification",{"chargePointVendor":"WGD","chargePointModel":"ICS_10"}]')
+        texto = ws.receive_text()
+    assert texto.startswith('[3,"1",{"status":"Accepted"')
+    assert ": " not in texto and ", " not in texto

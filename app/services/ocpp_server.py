@@ -34,6 +34,13 @@ CALLERROR = 4
 ENVIO_TIMEOUT_SECONDS = 5
 
 
+def _json(mensagem) -> str:
+    """JSON compacto, sem espacos. O firmware do JST-901 (WGD ICS_10) nao
+    entende `"status": "Accepted"` com espaco: repetia o BootNotification a
+    cada 10 s e ignorava nossos comandos. Ele mesmo manda sem espacos."""
+    return json.dumps(mensagem, separators=(",", ":"), ensure_ascii=False)
+
+
 class ErroOcpp(Exception):
     """Resposta CALLERROR do carregador para uma chamada nossa."""
 
@@ -85,7 +92,7 @@ def enviar_chamada(charge_point_id: str, acao: str, payload: dict) -> concurrent
     msg_id = uuid4().hex
     futuro: concurrent.futures.Future = concurrent.futures.Future()
     conexao.pendentes[msg_id] = (acao, futuro)
-    texto = json.dumps([CALL, msg_id, acao, payload])
+    texto = _json([CALL, msg_id, acao, payload])
     logging.info("[OCPP %s] >> %s", charge_point_id, texto)
     diagnostico.registrar("enviada", charge_point_id, f"Servidor pediu {acao}", acao=acao, bruto=texto)
     envio = asyncio.run_coroutine_threadsafe(conexao.websocket.send_text(texto), conexao.loop)
@@ -163,7 +170,7 @@ async def _processar_mensagem(conexao: ConexaoCarregador, texto: str) -> None:
         except Exception as exc:
             logging.exception("[OCPP %s] erro tratando %s", cp_id, acao)
             saida = [CALLERROR, msg_id, "InternalError", str(exc)[:200], {}]
-        texto_saida = json.dumps(saida)
+        texto_saida = _json(saida)
         logging.info("[OCPP %s] >> %s", cp_id, texto_saida)
         diagnostico.registrar(
             "resposta_enviada",
