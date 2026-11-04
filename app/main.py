@@ -14,6 +14,7 @@ import app.models.carregador  # noqa: F401 - registra as tabelas para o create_a
 import app.models.whatsapp  # noqa: F401
 from app.services import diagnostico
 from app.services.pagamentos import start_cobrancas_poller
+from app.services.mercado_pago_caixa import start_mp_caixa_poller
 from app.services.sumup import start_sumup_poller
 from app.services.whatsapp_alertas import start_whatsapp_worker
 from app.services.sessoes import start_sessoes_worker
@@ -31,6 +32,7 @@ async def lifespan(_app: FastAPI):
     start_sessoes_worker()
     start_cobrancas_poller()
     start_sumup_poller()
+    start_mp_caixa_poller()
     start_whatsapp_worker()
     yield
 

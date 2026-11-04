@@ -210,3 +210,36 @@ def test_renomear_carregador_renomeia_loja_e_caixa_no_mp(client, monkeypatch):
     assert any(url.endswith("/stores/STORE-POS-NOME") and body == {"name": "Garagem GiraKids"} for url, body in puts)
     assert any(url.endswith("/pos/POS-NOME") and body == {"name": "Garagem GiraKids"} for url, body in puts)
     assert client.get("/api/v1/admin/carregadores/CP-NOME/mercado-pago/caixa", headers=ADMIN).json() == {"loja": "Garagem GiraKids", "caixa": "Garagem GiraKids"}
+
+
+def test_poller_libera_pagamento_sem_webhook_e_avisa_nao_reconhecido(client, monkeypatch):
+    from app.services import diagnostico, mercado_pago_caixa
+
+    _carregador_com_caixa(client, "CP-POLL", "POS-POLL")
+    busca = {
+        "results": [
+            {"id": 9001, "status": "approved", "transaction_amount": 10, "payment_type_id": "credit_card", "pos_id": "POS-POLL"},
+            {"id": 9002, "status": "approved", "transaction_amount": 7, "point_of_interaction": {"transaction_data": {"terminal_id": "PAX-X"}}},
+        ]
+    }
+
+    def mp_falso(method, url, token, body=None, headers=None, timeout=30):
+        if "/v1/payments/search" in url:
+            return busca
+        raise AssertionError(url)
+
+    monkeypatch.setattr(pagamentos, "mp_request", mp_falso)
+    with client.websocket_connect("/CP-POLL") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        mercado_pago_caixa.poller_uma_vez()
+        cp.responder(cp.receber_chamada("RemoteStartTransaction"), {"status": "Accepted"})
+        mercado_pago_caixa.poller_uma_vez()  # segunda volta nao libera de novo
+
+    db = SessionLocal()
+    try:
+        assert db.query(Cobranca).filter(Cobranca.mp_payment_id == "9001").count() == 1
+    finally:
+        db.close()
+    avisos = [e for e in diagnostico.listar() if e["tipo"] == "pagamento"]
+    assert any("9002" in e["resumo"] and "PAX-X" in e["resumo"] for e in avisos)

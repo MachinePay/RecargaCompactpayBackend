@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # Tags RFID que liberam carga sem pagamento (manutencao/dono), separadas por virgula.
     OCPP_TAGS_MESTRE: str = os.getenv("OCPP_TAGS_MESTRE", "")
 
+    # Poller do caixa MP: rede de seguranca para webhook que nao chegou
+    # (ou nao foi configurado). Le os pagamentos aprovados dos ultimos minutos.
+    START_MP_CAIXA_POLLER: bool = os.getenv("START_MP_CAIXA_POLLER", "true").lower() == "true"
+    MP_CAIXA_POLLER_INTERVAL_SECONDS: float = float(os.getenv("MP_CAIXA_POLLER_INTERVAL_SECONDS", "15"))
+    MP_CAIXA_POLLER_JANELA_MINUTOS: int = int(os.getenv("MP_CAIXA_POLLER_JANELA_MINUTOS", "10"))
+
     # Poller da SumUp: pagamento digitado na maquininha nao gera webhook.
     START_SUMUP_POLLER_WORKER: bool = os.getenv("START_SUMUP_POLLER_WORKER", "true").lower() == "true"
     SUMUP_POLLER_INTERVAL_SECONDS: float = float(os.getenv("SUMUP_POLLER_INTERVAL_SECONDS", "10"))

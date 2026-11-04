@@ -8,6 +8,7 @@ O aviso chega pelo webhook de payment. O pagamento e' sempre reconsultado no
 MP; o carregador sai do pos_id/store_id do pagamento, igual ao
 _resolve_machine_by_mp_location da CompactPay.
 """
+import json
 import logging
 import re
 import threading
@@ -228,11 +229,23 @@ def _ids_de_local(pagamento: dict) -> dict[str, set[str]]:
 
 def carregador_do_pagamento(db, pagamento: dict) -> tuple[Carregador | None, str]:
     """Mesma regra da CompactPay: casa por caixa e loja; com os dois no
-    pagamento, os dois tem que bater; mais de um carregador = nao libera."""
+    pagamento, os dois tem que bater; mais de um carregador = nao libera.
+    Sem caixa/loja no pagamento, tenta pelo terminal (maquininha) informado
+    no carregador (mp_terminal_id), como a escuta de terminal da CompactPay."""
     ids = _ids_de_local(pagamento)
     tem_caixa = bool(ids["pos_ids"] or ids["pos_external_ids"])
     tem_loja = bool(ids["store_ids"] or ids["store_external_ids"])
     if not tem_caixa and not tem_loja:
+        terminais = _valores_por_chave(pagamento, {"terminal_id", "device_id", "serial_number"})
+        if terminais:
+            por_terminal = (
+                db.query(Carregador)
+                .filter(Carregador.mp_terminal_id.in_(terminais), Carregador.excluido_em.is_(None))
+                .all()
+            )
+            if len(por_terminal) == 1:
+                return por_terminal[0], "ok"
+            return None, f"pagamento sem caixa/loja; maquininha {', '.join(sorted(terminais))} nao esta em nenhum carregador"
         return None, "pagamento sem caixa/loja"
     candidatos = []
     for carregador in db.query(Carregador).filter(Carregador.mp_pos_id.isnot(None), Carregador.excluido_em.is_(None)).all():
@@ -318,12 +331,24 @@ def _tokens_conhecidos(db, user_id=None) -> list[str]:
     return list(dict.fromkeys(t.strip() for t in tokens if t and t.strip()))
 
 
-def processar_pagamento(payment_id: str, user_id=None) -> None:
-    """Webhook de payment: reconsulta no MP e libera o carregador do caixa."""
+def _avisar_nao_reconhecido(pagamento: dict, motivo: str) -> None:
+    """Aparece no Diagnostico: pagamento aprovado que nao liberou nada."""
+    from app.services import diagnostico
+
+    diagnostico.registrar(
+        "pagamento",
+        None,
+        f"Pagamento {pagamento.get('id')} de R$ {float(pagamento.get('transaction_amount') or 0):.2f} aprovado, mas nao liberou: {motivo}",
+        nivel="aviso",
+        bruto=json.dumps({k: pagamento.get(k) for k in ("id", "status", "transaction_amount", "pos_id", "store_id", "point_of_interaction", "date_created")}, default=str),
+    )
+
+
+def processar_pagamento(payment_id: str, user_id=None, pagamento: dict | None = None) -> None:
+    """Webhook de payment (ou o poller): reconsulta no MP e libera o carregador do caixa."""
     db = SessionLocal()
     try:
-        pagamento = None
-        for token in _tokens_conhecidos(db, user_id):
+        for token in ([] if pagamento is not None else _tokens_conhecidos(db, user_id)):
             try:
                 pagamento = pagamentos.mp_request("GET", f"{pagamentos.MP_API}/v1/payments/{payment_id}", token)
                 break
@@ -342,11 +367,70 @@ def processar_pagamento(payment_id: str, user_id=None) -> None:
             order_id and db.query(Cobranca).filter(Cobranca.mp_order_id == order_id).first()
         ):
             return
+        if db.query(Cobranca.id).filter(Cobranca.mp_payment_id == str(payment_id), Cobranca.origem.in_(("caixa", "point"))).first():
+            return  # ja liberado (webhook e poller chegam os dois)
         carregador, motivo = carregador_do_pagamento(db, pagamento)
         if carregador is None:
             logging.info("[MP caixa] payment %s ignorado: %s", payment_id, motivo)
+            _avisar_nao_reconhecido(pagamento, motivo)
             return
         metodo = pagamento.get("payment_type_id") or pagamento.get("payment_method_id")
         registrar_pagamento(db, carregador, float(pagamento.get("transaction_amount") or 0), str(payment_id), metodo)
     finally:
         db.close()
+
+
+
+# ---- Poller (rede de seguranca do webhook) ------------------------------
+
+# Pagamentos ja olhados pelo poller (liberados ou nao reconhecidos): nao repete
+# o aviso a cada volta. Em memoria; o banco segura a duplicidade de verdade.
+_vistos: set[str] = set()
+
+
+def poller_uma_vez() -> None:
+    """Le os pagamentos aprovados dos ultimos minutos de cada conta MP que tem
+    carregador com caixa e libera os que o webhook nao trouxe."""
+    db = SessionLocal()
+    try:
+        carregadores = db.query(Carregador).filter(Carregador.mp_pos_id.isnot(None), Carregador.excluido_em.is_(None)).all()
+        tokens = list(dict.fromkeys(t for t in (pagamentos.token_do_carregador(c) for c in carregadores) if t))
+    finally:
+        db.close()
+    inicio = (agora() - timedelta(minutes=settings.MP_CAIXA_POLLER_JANELA_MINUTOS)).strftime("%Y-%m-%dT%H:%M:%S.000-00:00")
+    for token in tokens:
+        params = urllib.parse.urlencode(
+            {"status": "approved", "sort": "date_created", "criteria": "desc", "limit": 50, "range": "date_created", "begin_date": inicio, "end_date": "NOW"}
+        )
+        try:
+            resultados = pagamentos.mp_request("GET", f"{pagamentos.MP_API}/v1/payments/search?{params}", token).get("results") or []
+        except HTTPException:
+            logging.warning("[MP caixa] busca de pagamentos falhou para um token")
+            continue
+        for pagamento in resultados:
+            payment_id = str(pagamento.get("id") or "")
+            if not payment_id or payment_id in _vistos:
+                continue
+            _vistos.add(payment_id)
+            processar_pagamento(payment_id, pagamento=pagamento)
+    if len(_vistos) > 5000:
+        _vistos.clear()
+
+
+def _rodar_poller() -> None:
+    logging.info("Poller do caixa Mercado Pago iniciado")
+    while True:
+        try:
+            poller_uma_vez()
+        except Exception:
+            logging.exception("Erro no poller do caixa Mercado Pago")
+        time.sleep(settings.MP_CAIXA_POLLER_INTERVAL_SECONDS)
+
+
+def start_mp_caixa_poller() -> threading.Thread | None:
+    if not settings.START_MP_CAIXA_POLLER:
+        logging.info("Poller do caixa MP desativado por START_MP_CAIXA_POLLER=false")
+        return None
+    thread = threading.Thread(target=_rodar_poller, daemon=True)
+    thread.start()
+    return thread

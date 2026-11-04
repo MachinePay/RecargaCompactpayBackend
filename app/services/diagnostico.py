@@ -55,7 +55,7 @@ def listar(desde: int = 0, carregador_id: str | None = None, limite: int = 300) 
     if carregador_id:
         # Tentativa de ID nao cadastrado aparece em qualquer filtro: e'
         # justamente o que se procura quando o carregador "nao aparece".
-        itens = [e for e in itens if e["carregador_id"] == carregador_id or e["tipo"] in ("recusada", "http")]
+        itens = [e for e in itens if e["carregador_id"] == carregador_id or e["tipo"] in ("recusada", "http", "pagamento")]
     return itens[-limite:]
 
 
