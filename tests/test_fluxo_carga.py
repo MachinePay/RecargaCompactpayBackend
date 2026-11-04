@@ -397,3 +397,26 @@ def test_stop_aceito_varias_vezes_sem_stop_transaction_encerra_a_sessao(client):
             cp.responder(cp.receber_chamada("RemoteStopTransaction"), {"status": "Accepted"})
         _esperar(lambda: _sessao(sessao_id).status == "finalizada")
     assert _sessao(sessao_id).motivo_fim == "stop_sem_confirmacao"
+
+
+def test_carga_sem_recarga_paga_e_bloqueada(client):
+    # JST-901 em "plug and charge": carrega ao plugar, sem StartTransaction.
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-PLUG", "nome_local": "x"}, headers=ADMIN)
+    client.patch("/api/v1/admin/carregadores/CP-PLUG", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
+    with client.websocket_connect("/CP-PLUG") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        cp.chamar("StatusNotification", {"connectorId": 1, "errorCode": "NoError", "status": "Charging"})
+        parar = cp.receber_chamada("RemoteStopTransaction")
+        assert parar[3] == {"transactionId": 0}
+        cp.responder(parar, {"status": "Accepted"})
+        indisponivel = cp.receber_chamada("ChangeAvailability")
+        assert indisponivel[3]["type"] == "Inoperative"
+        cp.responder(indisponivel, {"status": "Accepted"})
+
+        # Venda paga: volta a disponibilizar antes de ligar.
+        client.post("/api/v1/admin/carregadores/CP-PLUG/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        assert cp.receber_chamada("ChangeAvailability")[3]["type"] == "Operative"
+        cp.responder(cp.receber_chamada("RemoteStartTransaction"), {"status": "Accepted"})
+    historico = client.get("/api/v1/admin/carregadores/CP-PLUG/historico", headers=ADMIN).json()
+    assert any("ALERTA: carregando sem recarga paga" in h["descricao"] for h in historico)

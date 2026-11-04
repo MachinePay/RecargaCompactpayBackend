@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     TEMPO_MAXIMO_INICIO_SEGUNDOS: int = int(os.getenv("TEMPO_MAXIMO_INICIO_SEGUNDOS", "180"))
     # Intervalo entre tentativas de RemoteStopTransaction ate o carregador confirmar.
     STOP_RETRY_SEGUNDOS: int = int(os.getenv("STOP_RETRY_SEGUNDOS", "15"))
+    # Carregador carregando sem recarga paga aberta (modo "plug and charge" do
+    # firmware): o servidor manda parar. false = so registra o alerta.
+    BLOQUEAR_CARGA_SEM_PAGAMENTO: bool = os.getenv("BLOQUEAR_CARGA_SEM_PAGAMENTO", "true").lower() == "true"
     # Tags RFID que liberam carga sem pagamento (manutencao/dono), separadas por virgula.
     OCPP_TAGS_MESTRE: str = os.getenv("OCPP_TAGS_MESTRE", "")
 

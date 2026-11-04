@@ -3,6 +3,7 @@
 Roda em threadpool (ver ocpp_server.py); cada chamada abre a propria sessao
 de banco. Os nomes dos campos seguem a especificacao OCPP 1.6J.
 """
+import threading
 from datetime import datetime, timedelta
 
 from app.core.config import settings, tags_mestre
@@ -113,6 +114,60 @@ def _heartbeat(db, carregador: Carregador, payload: dict) -> dict:
     return {"currentTime": _iso(agora())}
 
 
+# Ultima tentativa de parar carga sem pagamento, por carregador (nao insiste a cada mensagem).
+_ultimo_bloqueio: dict[str, datetime] = {}
+INTERVALO_BLOQUEIO = timedelta(seconds=30)
+STATUS_ENTREGANDO = ("Charging", "SuspendedEV", "SuspendedEVSE")
+
+
+def liberar_bloqueio(carregador_id: str) -> bool:
+    """True se o carregador tinha sido bloqueado (precisa voltar a Operative)."""
+    return _ultimo_bloqueio.pop(carregador_id, None) is not None
+
+
+def _tem_recarga_aberta(db, carregador: Carregador) -> bool:
+    return (
+        db.query(SessaoCarga.id)
+        .filter(SessaoCarga.carregador_id == carregador.id_hardware, SessaoCarga.status.in_(STATUS_SESSAO_ATIVA))
+        .first()
+        is not None
+    )
+
+
+def _bloquear_carga_sem_pagamento(db, carregador: Carregador, transaction_id: int | None, motivo: str) -> None:
+    """O JST-901 em "plug and charge" carrega ao plugar, sem StartTransaction
+    (transactionId 0). Sem recarga paga aberta, manda parar: RemoteStop com o
+    transactionId que ele usou e, de reserva, deixa o conector indisponivel
+    ate a proxima venda (o RemoteStart volta a disponibilizar)."""
+    if _tem_recarga_aberta(db, carregador):
+        return
+    momento = agora()
+    anterior = _ultimo_bloqueio.get(carregador.id_hardware)
+    if anterior and momento - anterior < INTERVALO_BLOQUEIO:
+        return
+    _ultimo_bloqueio[carregador.id_hardware] = momento
+    registrar_historico(
+        db,
+        carregador.id_hardware,
+        "SESSAO",
+        f"ALERTA: carregando sem recarga paga ({motivo})"
+        + (". Mandando parar." if settings.BLOQUEAR_CARGA_SEM_PAGAMENTO else ". Bloqueio desligado (BLOQUEAR_CARGA_SEM_PAGAMENTO=false)."),
+    )
+    if not settings.BLOQUEAR_CARGA_SEM_PAGAMENTO:
+        return
+
+    carregador_id, conector, tx = carregador.id_hardware, carregador.connector_id, transaction_id or 0
+
+    def parar():
+        # Fora do tratamento da mensagem: o carregador recebe nossa resposta antes.
+        from app.services import ocpp_server  # ocpp_server importa este modulo
+
+        ocpp_server.enviar_chamada(carregador_id, "RemoteStopTransaction", {"transactionId": tx})
+        ocpp_server.enviar_chamada(carregador_id, "ChangeAvailability", {"connectorId": conector, "type": "Inoperative"})
+
+    threading.Timer(1.0, parar).start()
+
+
 def _status_notification(db, carregador: Carregador, payload: dict) -> dict:
     connector_id = _inteiro(payload.get("connectorId"))
     status = payload.get("status")
@@ -129,6 +184,8 @@ def _status_notification(db, carregador: Carregador, payload: dict) -> dict:
             )
         carregador.status_conector = status
         carregador.erro_conector = erro_gravado
+        if status in STATUS_ENTREGANDO:
+            _bloquear_carga_sem_pagamento(db, carregador, None, f"conector em {status}")
     elif connector_id == 0 and status == "Faulted":
         registrar_historico(db, carregador.id_hardware, "DISPOSITIVO", f"Carregador em falha: {erro}")
     return {}
@@ -263,6 +320,8 @@ def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
     transaction_id = _inteiro(payload.get("transactionId"))
     sessao = db.get(SessaoCarga, transaction_id) if transaction_id is not None else None
     if sessao is None or sessao.carregador_id != carregador.id_hardware:
+        if _corrente(payload) > 0.5:
+            _bloquear_carga_sem_pagamento(db, carregador, transaction_id, f"medindo {_corrente(payload):.1f} A, transactionId {transaction_id}")
         return {}
     for meter_value in payload.get("meterValue") or []:
         for amostra in meter_value.get("sampledValue") or []:
@@ -277,6 +336,19 @@ def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
                 valor *= 1000
             sessao.meter_atual_wh = int(valor)
     return {}
+
+
+def _corrente(payload: dict) -> float:
+    """Maior corrente (A) informada no MeterValues; 0 se nao veio."""
+    maior = 0.0
+    for meter_value in payload.get("meterValue") or []:
+        for amostra in meter_value.get("sampledValue") or []:
+            if str(amostra.get("measurand") or "").startswith("Current"):
+                try:
+                    maior = max(maior, float(amostra.get("value")))
+                except (TypeError, ValueError):
+                    pass
+    return maior
 
 
 def _ok_vazio(db, carregador: Carregador, payload: dict) -> dict:
