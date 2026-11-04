@@ -8,6 +8,7 @@ para historico_operacoes.
 import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 
@@ -15,6 +16,32 @@ from app.db.base import Base
 def agora() -> datetime.datetime:
     """UTC sem fuso (mesmo formato do datetime.utcnow usado na CompactPay)."""
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+class Cliente(Base):
+    """Dono dos carregadores, igual ao Cliente da CompactPay: cada um tem a
+    propria conta do Mercado Pago (access token) e o endereco usado na loja
+    do MP. O token nunca sai do servidor."""
+    __tablename__ = "clientes"
+    id = Column(Integer, primary_key=True)
+    nome_empresa = Column(String, nullable=False)
+    email_contato = Column(String, nullable=True)
+    telefone = Column(String, nullable=True)
+    documento = Column(String, nullable=True)  # CPF ou CNPJ
+    endereco_rua = Column(String, nullable=True)
+    endereco_numero = Column(String, nullable=True)
+    endereco_cidade = Column(String, nullable=True)
+    endereco_estado = Column(String, nullable=True)
+    endereco_latitude = Column(Float, nullable=True)
+    endereco_longitude = Column(Float, nullable=True)
+    mp_access_token = Column(String, nullable=True)
+    # Conta do MP dona do token (GET /users/me). O webhook manda esse user_id,
+    # e e' por ele que se acha o token certo (resolve_mp_token_by_user_id).
+    mp_user_id = Column(String, nullable=True, index=True)
+    # Categoria (MCC) que o MP aceitou no ultimo caixa criado.
+    mp_pos_category = Column(Integer, nullable=True)
+    ativo = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=agora, nullable=False)
 
 
 class Carregador(Base):
@@ -27,7 +54,9 @@ class Carregador(Base):
     ocpp_senha_hash = Column(String, nullable=True)
     # Point Smart que cobra por este carregador (terminal_id da Orders API do MP).
     mp_terminal_id = Column(String, nullable=True)
-    # Token do dono; vazio usa o MP_ACCESS_TOKEN global.
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), index=True, nullable=True)
+    cliente = relationship(Cliente)
+    # Token so deste carregador (legado). O normal e' o token do cliente.
     mp_access_token = Column(String, nullable=True)
     # Loja e caixa (POS) no MP, criados pelo painel. Pagamento aprovado numa
     # maquininha vinculada a este caixa libera tempo (mercado_pago_caixa.py).

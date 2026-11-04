@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.session import SessionLocal, eh_postgres
-from app.models.carregador import Carregador, Cobranca, agora
+from app.models.carregador import Carregador, Cliente, Cobranca, agora
 from app.services import pagamentos
 from app.services.ocpp_handlers import registrar_historico
 
@@ -50,8 +50,8 @@ def _sem_acento(valor: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFD", valor or "") if unicodedata.category(ch) != "Mn").casefold().strip()
 
 
-def _categorias() -> list[int]:
-    candidatas = [settings.MP_DEFAULT_POS_CATEGORY]
+def _categorias(preferida: int | None = None) -> list[int]:
+    candidatas = ([preferida] if preferida else []) + [settings.MP_DEFAULT_POS_CATEGORY]
     candidatas += [int(c) for c in settings.MP_POS_CATEGORY_FALLBACKS.split(",") if c.strip().isdigit()]
     return list(dict.fromkeys(candidatas))
 
@@ -64,10 +64,24 @@ def _buscar(url: str, token: str) -> dict | None:
     return resultados[0] if resultados else None
 
 
+def _endereco_da_loja(carregador: Carregador, endereco: dict) -> dict:
+    """Endereco informado na hora > endereco do cliente > MP_DEFAULT_STORE_*."""
+    cliente = carregador.cliente
+    return {
+        "street_number": endereco.get("numero") or (cliente and cliente.endereco_numero) or settings.MP_DEFAULT_STORE_STREET_NUMBER,
+        "street_name": endereco.get("rua") or (cliente and cliente.endereco_rua) or settings.MP_DEFAULT_STORE_STREET_NAME,
+        "city_name": endereco.get("cidade") or (cliente and cliente.endereco_cidade) or settings.MP_DEFAULT_STORE_CITY_NAME,
+        "state_name": endereco.get("estado") or (cliente and cliente.endereco_estado) or settings.MP_DEFAULT_STORE_STATE_NAME,
+        "latitude": cliente.endereco_latitude if cliente and cliente.endereco_latitude is not None else settings.MP_DEFAULT_STORE_LATITUDE,
+        "longitude": cliente.endereco_longitude if cliente and cliente.endereco_longitude is not None else settings.MP_DEFAULT_STORE_LONGITUDE,
+    }
+
+
 def _criar_loja(carregador: Carregador, token: str, endereco: dict) -> dict:
-    user_id = carregador.mp_user_id or str(pagamentos.mp_request("GET", f"{pagamentos.MP_API}/users/me", token).get("id") or "")
-    if not user_id:
-        raise HTTPException(status_code=502, detail="Mercado Pago nao retornou o user_id da conta")
+    cliente = carregador.cliente
+    user_id = (cliente.mp_user_id if cliente and cliente.mp_access_token and token == cliente.mp_access_token.strip() else None) or (
+        carregador.mp_user_id or pagamentos.mp_user_id_do_token(token)
+    )
     external_id = _normalizar_external_id(f"EVSTORE{carregador.id_hardware}", max_length=60)
     busca = f"{pagamentos.MP_API}/users/{urllib.parse.quote(user_id)}/stores/search?{urllib.parse.urlencode({'external_id': external_id})}"
     loja = _buscar(busca, token)
@@ -76,15 +90,7 @@ def _criar_loja(carregador: Carregador, token: str, endereco: dict) -> dict:
         corpo = {
             "name": nome,
             "external_id": external_id,
-            "location": {
-                "street_number": endereco.get("numero") or settings.MP_DEFAULT_STORE_STREET_NUMBER,
-                "street_name": endereco.get("rua") or settings.MP_DEFAULT_STORE_STREET_NAME,
-                "city_name": endereco.get("cidade") or settings.MP_DEFAULT_STORE_CITY_NAME,
-                "state_name": endereco.get("estado") or settings.MP_DEFAULT_STORE_STATE_NAME,
-                "latitude": settings.MP_DEFAULT_STORE_LATITUDE,
-                "longitude": settings.MP_DEFAULT_STORE_LONGITUDE,
-                "reference": nome,
-            },
+            "location": {**_endereco_da_loja(carregador, endereco), "reference": nome},
         }
         url = f"{pagamentos.MP_API}/users/{urllib.parse.quote(user_id)}/stores"
         try:
@@ -110,7 +116,7 @@ def _criar_loja(carregador: Carregador, token: str, endereco: dict) -> dict:
 def criar_loja_e_caixa(db, carregador: Carregador, endereco: dict | None = None) -> Carregador:
     token = pagamentos.token_do_carregador(carregador)
     if not token:
-        raise HTTPException(status_code=422, detail="Sem token do Mercado Pago: configure MP_ACCESS_TOKEN no servidor ou o token do carregador")
+        raise HTTPException(status_code=422, detail="Sem token do Mercado Pago: vincule o carregador a um cliente com o token cadastrado")
     loja = _criar_loja(carregador, token, endereco or {})
     if not loja["mp_store_id"]:
         raise HTTPException(status_code=502, detail="Mercado Pago criou a loja, mas nao retornou o id")
@@ -124,12 +130,15 @@ def criar_loja_e_caixa(db, carregador: Carregador, endereco: dict | None = None)
             corpo["store_id"] = int(loja["mp_store_id"])
         else:
             corpo["external_store_id"] = loja["mp_store_external_id"]
-        for categoria in _categorias():
+        cliente = carregador.cliente
+        for categoria in _categorias(cliente.mp_pos_category if cliente else None):
             corpo["category"] = categoria
             try:
                 caixa = pagamentos.mp_request(
                     "POST", f"{pagamentos.MP_API}/pos", token, body=corpo, headers={"X-Idempotency-Key": f"{external_id}{categoria}"}
                 )
+                if cliente is not None:
+                    cliente.mp_pos_category = categoria
                 break
             except HTTPException as exc:
                 ultimo_erro = exc
@@ -252,17 +261,29 @@ def registrar_pagamento(db, carregador: Carregador, valor: float, payment_id: st
     return cobranca
 
 
-def _tokens_conhecidos(db) -> list[str]:
-    tokens = [settings.MP_ACCESS_TOKEN] + [c.mp_access_token for c in db.query(Carregador).all()]
+def _tokens_conhecidos(db, user_id=None) -> list[str]:
+    """Primeiro o token do cliente dono da conta que gerou o aviso (o webhook
+    manda o user_id, igual resolve_mp_token_by_user_id da CompactPay); depois
+    os outros, para aviso sem user_id."""
+    preferido = None
+    if user_id:
+        cliente = db.query(Cliente).filter(Cliente.mp_user_id == str(user_id), Cliente.mp_access_token.isnot(None)).first()
+        preferido = cliente.mp_access_token if cliente else None
+    tokens = (
+        [preferido]
+        + [c.mp_access_token for c in db.query(Cliente).filter(Cliente.ativo.is_(True)).all()]
+        + [c.mp_access_token for c in db.query(Carregador).all()]
+        + [settings.MP_ACCESS_TOKEN]
+    )
     return list(dict.fromkeys(t.strip() for t in tokens if t and t.strip()))
 
 
-def processar_pagamento(payment_id: str) -> None:
+def processar_pagamento(payment_id: str, user_id=None) -> None:
     """Webhook de payment: reconsulta no MP e libera o carregador do caixa."""
     db = SessionLocal()
     try:
         pagamento = None
-        for token in _tokens_conhecidos(db):
+        for token in _tokens_conhecidos(db, user_id):
             try:
                 pagamento = pagamentos.mp_request("GET", f"{pagamentos.MP_API}/v1/payments/{payment_id}", token)
                 break

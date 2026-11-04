@@ -73,7 +73,20 @@ def mp_request(method: str, url: str, token: str, body: dict | None = None, head
 
 
 def token_do_carregador(carregador: Carregador) -> str:
-    return (carregador.mp_access_token or settings.MP_ACCESS_TOKEN or "").strip()
+    """Token do MP que cobra por este carregador: o do cliente dono (igual
+    CompactPay). O do proprio carregador e o MP_ACCESS_TOKEN global ficam
+    so como reserva."""
+    cliente = carregador.cliente
+    token_cliente = cliente.mp_access_token if cliente is not None and cliente.ativo else None
+    return (carregador.mp_access_token or token_cliente or settings.MP_ACCESS_TOKEN or "").strip()
+
+
+def mp_user_id_do_token(token: str) -> str:
+    """Valida o token e devolve a conta dona (GET /users/me)."""
+    user_id = str(mp_request("GET", f"{MP_API}/users/me", token).get("id") or "")
+    if not user_id:
+        raise HTTPException(status_code=502, detail="Mercado Pago nao retornou o user_id da conta")
+    return user_id
 
 
 def _usa_mercado_pago(cobranca: Cobranca) -> bool:
@@ -201,7 +214,7 @@ def processar_webhook(dados: dict) -> None:
     if tipo == "payment" or acao.startswith("payment."):
         from app.services import mercado_pago_caixa  # importa este modulo
 
-        mercado_pago_caixa.processar_pagamento(order_id)
+        mercado_pago_caixa.processar_pagamento(order_id, dados.get("user_id"))
         return
     db = SessionLocal()
     try:

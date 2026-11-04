@@ -133,3 +133,46 @@ def _sessao_db(sessao_id: int) -> SessaoCarga:
         return db.get(SessaoCarga, sessao_id)
     finally:
         db.close()
+
+
+def test_cliente_com_token_proprio_cria_caixa_com_o_endereco_dele(client, monkeypatch):
+    chamadas = []
+
+    def mp_falso(method, url, token, body=None, headers=None, timeout=30):
+        chamadas.append((method, url, token, body))
+        if url.endswith("/users/me"):
+            if token == "APP_USR-ruim":
+                raise pagamentos.HTTPException(status_code=502, detail="Mercado Pago retornou erro 401: invalid_token")
+            return {"id": 777}
+        if "/stores/search" in url or url.startswith("https://api.mercadopago.com/pos?"):
+            return {"results": []}
+        if url.endswith("/stores"):
+            return {"id": "S9", "external_id": body["external_id"]}
+        if url.endswith("/pos"):
+            return {"id": "P9", "external_id": body["external_id"]}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(pagamentos, "mp_request", mp_falso)
+    ruim = client.post("/api/v1/admin/clientes", json={"nome_empresa": "X", "mp_access_token": "APP_USR-ruim"}, headers=ADMIN)
+    assert ruim.status_code == 422
+
+    r = client.post(
+        "/api/v1/admin/clientes",
+        json={"nome_empresa": "Gira Kids", "mp_access_token": "APP_USR-bom", "endereco_rua": "Rua A", "endereco_numero": "10",
+              "endereco_cidade": "Campinas", "endereco_estado": "Sao Paulo"},
+        headers=ADMIN,
+    )
+    cliente = r.json()
+    assert cliente["tem_token_mp"] and cliente["mp_user_id"] == "777" and "mp_access_token" not in cliente
+
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-CLIENTE", "nome_local": "Garagem", "cliente_id": cliente["id"]}, headers=ADMIN)
+    r = client.post("/api/v1/admin/carregadores/CP-CLIENTE/mercado-pago/caixa", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["cliente_nome"] == "Gira Kids" and r.json()["mp_pos_id"] == "P9"
+    loja = next(body for method, url, token, body in chamadas if method == "POST" and url.endswith("/stores"))
+    assert loja["location"]["city_name"] == "Campinas" and loja["location"]["street_name"] == "Rua A"
+    assert all(token == "APP_USR-bom" for method, url, token, body in chamadas if "users/me" not in url)
+
+    # Editar sem mandar token mantem o salvo.
+    r = client.patch(f"/api/v1/admin/clientes/{cliente['id']}", json={"telefone": "1199"}, headers=ADMIN)
+    assert r.json()["tem_token_mp"] and r.json()["carregadores"] == 1

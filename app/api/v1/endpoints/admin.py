@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.carregador import Carregador, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, agora
+from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, agora
 from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, sessoes, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
 from app.api.v1.endpoints.tablet import serializar_sessao
@@ -42,6 +42,7 @@ class CarregadorCreate(BaseModel):
     connector_id: int = 1
     mp_terminal_id: str | None = None
     mp_access_token: str | None = None
+    cliente_id: int | None = None
     gerar_senha_ocpp: bool = False
 
 
@@ -51,8 +52,25 @@ class CarregadorUpdate(BaseModel):
     mp_terminal_id: str | None = None
     mp_access_token: str | None = None
     ativo: bool | None = None
+    cliente_id: int | None = None
     preco_valor: float | None = Field(default=None, gt=0)
     preco_minutos: int | None = Field(default=None, gt=0, le=24 * 60)
+
+
+class ClienteDados(BaseModel):
+    nome_empresa: str | None = Field(default=None, min_length=1, max_length=80)
+    email_contato: str | None = None
+    telefone: str | None = None
+    documento: str | None = None
+    endereco_rua: str | None = None
+    endereco_numero: str | None = None
+    endereco_cidade: str | None = None
+    endereco_estado: str | None = None
+    endereco_latitude: float | None = None
+    endereco_longitude: float | None = None
+    # Vazio na edicao = manter o token salvo.
+    mp_access_token: str | None = None
+    ativo: bool | None = None
 
 
 class EnderecoLoja(BaseModel):
@@ -103,6 +121,8 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "firmware_version": carregador.firmware_version,
         "ultimo_sinal": carregador.ultimo_sinal,
         "tem_senha_ocpp": bool(carregador.ocpp_senha_hash),
+        "cliente_id": carregador.cliente_id,
+        "cliente_nome": carregador.cliente.nome_empresa if carregador.cliente else None,
         "tem_token_mp": bool(pagamentos.token_do_carregador(carregador)),
         "preco_valor": carregador.preco_valor,
         "preco_minutos": carregador.preco_minutos,
@@ -124,12 +144,15 @@ def _obter(db: Session, carregador_id: str) -> Carregador:
 def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
     if db.get(Carregador, dados.id_hardware):
         raise HTTPException(status_code=409, detail="Carregador ja cadastrado")
+    if dados.cliente_id is not None and db.get(Cliente, dados.cliente_id) is None:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
     carregador = Carregador(
         id_hardware=dados.id_hardware,
         nome_local=dados.nome_local,
         connector_id=dados.connector_id,
         mp_terminal_id=dados.mp_terminal_id,
         mp_access_token=dados.mp_access_token,
+        cliente_id=dados.cliente_id,
     )
     senha = None
     if dados.gerar_senha_ocpp:
@@ -205,9 +228,17 @@ def resumo(db: Session = Depends(get_db)):
 @router.patch("/carregadores/{carregador_id}", dependencies=[Depends(exigir_admin)])
 def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Session = Depends(get_db)):
     carregador = _obter(db, carregador_id)
-    for campo, valor in dados.model_dump(exclude_unset=True).items():
+    campos = dados.model_dump(exclude_unset=True)
+    if campos.get("cliente_id") is not None and db.get(Cliente, campos["cliente_id"]) is None:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    if campos.get("cliente_id") != carregador.cliente_id and "cliente_id" in campos and carregador.mp_pos_id:
+        # O caixa e' da conta MP do cliente antigo; outro dono precisa de caixa novo.
+        carregador.mp_user_id = carregador.mp_store_id = carregador.mp_store_external_id = None
+        carregador.mp_pos_id = carregador.mp_pos_external_id = None
+    for campo, valor in campos.items():
         setattr(carregador, campo, valor)
     db.commit()
+    db.refresh(carregador)
     return _serializar_carregador(carregador)
 
 
@@ -424,3 +455,69 @@ def simular_pagamento_caixa(carregador_id: str, dados: PagamentoSimulado, db: Se
         "estornada": bool(cobranca.estornada_em),
         "sessao": serializar_sessao(ativa) if ativa else None,
     }
+
+
+# ---- Clientes (donos dos carregadores, com a conta do Mercado Pago) -----
+
+def _serializar_cliente(cliente: Cliente, db: Session) -> dict:
+    return {
+        "id": cliente.id,
+        "nome_empresa": cliente.nome_empresa,
+        "email_contato": cliente.email_contato,
+        "telefone": cliente.telefone,
+        "documento": cliente.documento,
+        "endereco_rua": cliente.endereco_rua,
+        "endereco_numero": cliente.endereco_numero,
+        "endereco_cidade": cliente.endereco_cidade,
+        "endereco_estado": cliente.endereco_estado,
+        "endereco_latitude": cliente.endereco_latitude,
+        "endereco_longitude": cliente.endereco_longitude,
+        "ativo": cliente.ativo,
+        "tem_token_mp": bool(cliente.mp_access_token),
+        # So o comeco, para conferir qual conta esta ligada sem expor o token.
+        "token_mp_prefixo": (cliente.mp_access_token or "")[:12] or None,
+        "mp_user_id": cliente.mp_user_id,
+        "carregadores": db.query(Carregador).filter(Carregador.cliente_id == cliente.id).count(),
+        "created_at": cliente.created_at,
+    }
+
+
+def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
+    campos = dados.model_dump(exclude_unset=True)
+    token = (campos.pop("mp_access_token", None) or "").strip()
+    for campo, valor in campos.items():
+        setattr(cliente, campo, valor.strip() if isinstance(valor, str) else valor)
+    if token:
+        # Confere o token no MP antes de salvar (token errado so apareceria
+        # na hora de criar o caixa ou, pior, de receber um pagamento).
+        try:
+            cliente.mp_user_id = pagamentos.mp_user_id_do_token(token)
+        except HTTPException as exc:
+            raise HTTPException(status_code=422, detail=f"Token do Mercado Pago recusado: {exc.detail}") from exc
+        cliente.mp_access_token = token
+
+
+@router.get("/clientes", dependencies=[Depends(exigir_admin)])
+def listar_clientes(db: Session = Depends(get_db)):
+    return [_serializar_cliente(c, db) for c in db.query(Cliente).order_by(Cliente.nome_empresa).all()]
+
+
+@router.post("/clientes", dependencies=[Depends(exigir_admin)])
+def criar_cliente(dados: ClienteDados, db: Session = Depends(get_db)):
+    if not (dados.nome_empresa or "").strip():
+        raise HTTPException(status_code=422, detail="Informe o nome do cliente")
+    cliente = Cliente(nome_empresa=dados.nome_empresa.strip())
+    _aplicar_dados_cliente(cliente, dados)
+    db.add(cliente)
+    db.commit()
+    return _serializar_cliente(cliente, db)
+
+
+@router.patch("/clientes/{cliente_id}", dependencies=[Depends(exigir_admin)])
+def atualizar_cliente(cliente_id: int, dados: ClienteDados, db: Session = Depends(get_db)):
+    cliente = db.get(Cliente, cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    _aplicar_dados_cliente(cliente, dados)
+    db.commit()
+    return _serializar_cliente(cliente, db)
