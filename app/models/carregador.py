@@ -96,7 +96,9 @@ class Carregador(Base):
     mp_store_external_id = Column(String, nullable=True)
     mp_pos_id = Column(String, nullable=True)
     mp_pos_external_id = Column(String, nullable=True)
-    # Onde o carregador esta (mapa do painel).
+    # Onde o carregador esta (mapa do painel). O CEP e' opcional e serve
+    # para preencher endereco e coordenadas aproximadas (services/geo.py).
+    cep = Column(String, nullable=True)
     endereco = Column(String, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)

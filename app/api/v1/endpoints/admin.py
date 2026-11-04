@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
-from app.services import auth, diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
+from app.services import auth, diagnostico, geo, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -96,6 +96,9 @@ class CarregadorCreate(BaseModel):
     sumup_reader_id: str | None = None
     sumup_device_code: str | None = None
     sumup_usuario: str | None = None
+    # Opcional: CEP (e numero) para ja aparecer no mapa.
+    cep: str | None = None
+    numero_endereco: str | None = None
     mp_terminal_id: str | None = None
     mp_access_token: str | None = None
     gerar_senha_ocpp: bool = False
@@ -111,6 +114,7 @@ class CarregadorUpdate(BaseModel):
     sumup_reader_id: str | None = None
     sumup_device_code: str | None = None
     sumup_usuario: str | None = None
+    cep: str | None = None
     endereco: str | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
@@ -232,6 +236,7 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "online": conexao is not None,
         "online_desde": conexao["desde"] if conexao else None,
         "ip": conexao["ip"] if conexao else None,
+        "cep": carregador.cep,
         "endereco": carregador.endereco,
         "latitude": carregador.latitude,
         "longitude": carregador.longitude,
@@ -291,6 +296,15 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         sumup_device_code=(dados.sumup_device_code or "").strip() or None,
         sumup_usuario=(dados.sumup_usuario or "").strip() or None,
     )
+    if (dados.cep or "").strip():
+        # Opcional: endereco e ponto aproximado no mapa. Falhar aqui nao impede o cadastro.
+        try:
+            local = geo.buscar_cep(dados.cep, (dados.numero_endereco or "").strip() or None)
+            carregador.cep = local["cep"]
+            carregador.endereco = local["endereco"]
+            carregador.latitude, carregador.longitude = local["latitude"], local["longitude"]
+        except HTTPException:
+            carregador.cep = dados.cep.strip()
     senha = None
     if dados.gerar_senha_ocpp:
         # Senha curta o bastante para digitar no app do fabricante.
@@ -851,3 +865,9 @@ def atualizar_usuario(usuario_id: int, dados: UsuarioDados, db: Session = Depend
     _aplicar_usuario(db, usuario, dados)
     db.commit()
     return _serializar_usuario(usuario)
+
+
+@router.get("/cep/{cep}", dependencies=[Depends(exigir_admin)])
+def consultar_cep(cep: str, numero: str | None = None):
+    """Endereco e coordenadas aproximadas do CEP (para o mapa)."""
+    return geo.buscar_cep(cep, (numero or "").strip() or None)
