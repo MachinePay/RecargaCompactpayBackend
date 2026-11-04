@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     START_SUMUP_POLLER_WORKER: bool = os.getenv("START_SUMUP_POLLER_WORKER", "true").lower() == "true"
     SUMUP_POLLER_INTERVAL_SECONDS: float = float(os.getenv("SUMUP_POLLER_INTERVAL_SECONDS", "10"))
 
+    # Avisos de WhatsApp (Evolution API): carregador offline, voltou, resumo.
+    START_WHATSAPP_WORKER: bool = os.getenv("START_WHATSAPP_WORKER", "true").lower() == "true"
+    WHATSAPP_INTERVALO_SEGUNDOS: float = float(os.getenv("WHATSAPP_INTERVALO_SEGUNDOS", "60"))
+
     START_SESSOES_WORKER: bool = os.getenv("START_SESSOES_WORKER", "true").lower() == "true"
     SESSOES_WORKER_INTERVAL_SECONDS: float = float(os.getenv("SESSOES_WORKER_INTERVAL_SECONDS", "2"))
     START_COBRANCAS_POLLER_WORKER: bool = os.getenv("START_COBRANCAS_POLLER_WORKER", "true").lower() == "true"
