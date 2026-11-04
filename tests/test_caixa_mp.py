@@ -176,3 +176,16 @@ def test_cliente_com_token_proprio_cria_caixa_com_o_endereco_dele(client, monkey
     # Editar sem mandar token mantem o salvo.
     r = client.patch(f"/api/v1/admin/clientes/{cliente['id']}", json={"telefone": "1199"}, headers=ADMIN)
     assert r.json()["tem_token_mp"] and r.json()["carregadores"] == 1
+
+
+def test_cliente_guarda_public_key_client_id_e_secret(client):
+    r = client.post(
+        "/api/v1/admin/clientes",
+        json={"nome_empresa": "Com OAuth", "cliente_mercado_pago": True, "mp_public_key": "APP_USR-pub", "mp_client_id": "123", "mp_client_secret": "segredo"},
+        headers=ADMIN,
+    ).json()
+    assert r["mp_public_key"] == "APP_USR-pub" and r["mp_client_id"] == "123" and r["tem_client_secret"]
+    assert "segredo" not in str(r)
+    # Editar sem mandar o secret mantem o salvo.
+    r = client.patch(f"/api/v1/admin/clientes/{r['id']}", json={"mp_client_id": "456"}, headers=ADMIN).json()
+    assert r["mp_client_id"] == "456" and r["tem_client_secret"]

@@ -137,6 +137,9 @@ class ClienteDados(BaseModel):
     cliente_sumup: bool | None = None
     # Vazio na edicao = manter o que esta salvo.
     mp_access_token: str | None = None
+    mp_public_key: str | None = None
+    mp_client_id: str | None = None
+    mp_client_secret: str | None = None  # vazio na edicao = manter
     sumup_api_key: str | None = None
     ativo: bool | None = None
 
@@ -676,6 +679,10 @@ def _serializar_cliente(cliente: Cliente, db: Session) -> dict:
         "tem_token_mp": bool(cliente.mp_access_token),
         # So o comeco, para conferir qual conta esta ligada sem expor o token.
         "token_mp_prefixo": (cliente.mp_access_token or "")[:12] or None,
+        # Public Key e Client ID nao sao segredo; o Client Secret nunca volta.
+        "mp_public_key": cliente.mp_public_key,
+        "mp_client_id": cliente.mp_client_id,
+        "tem_client_secret": bool(cliente.mp_client_secret),
         "mp_user_id": cliente.mp_user_id,
         "carregadores": db.query(Carregador).filter(Carregador.cliente_id == cliente.id).count(),
         "created_at": cliente.created_at,
@@ -686,6 +693,9 @@ def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
     campos = dados.model_dump(exclude_unset=True)
     token = (campos.pop("mp_access_token", None) or "").strip()
     chave_sumup = (campos.pop("sumup_api_key", None) or "").strip()
+    segredo = (campos.pop("mp_client_secret", None) or "").strip()
+    if segredo:
+        cliente.mp_client_secret = segredo
     if chave_sumup:
         # Confere a chave e ja descobre o merchant_code (GET /v0.1/me).
         try:

@@ -35,6 +35,11 @@ class Cliente(Base):
     endereco_latitude = Column(Float, nullable=True)
     endereco_longitude = Column(Float, nullable=True)
     mp_access_token = Column(String, nullable=True)
+    # Guardados para um dia usar (igual Cliente da CompactPay): Public Key para
+    # checkout de cartao; Client ID/Secret para o "Conectar Mercado Pago" (OAuth).
+    mp_public_key = Column(String, nullable=True)
+    mp_client_id = Column(String, nullable=True)
+    mp_client_secret = Column(String, nullable=True)
     # Conta do MP dona do token (GET /users/me). O webhook manda esse user_id,
     # e e' por ele que se acha o token certo (resolve_mp_token_by_user_id).
     mp_user_id = Column(String, nullable=True, index=True)
