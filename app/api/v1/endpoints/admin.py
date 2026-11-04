@@ -421,11 +421,19 @@ def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Sessio
         # O caixa e' da conta MP do cliente antigo; outro dono precisa de caixa novo.
         carregador.mp_user_id = carregador.mp_store_id = carregador.mp_store_external_id = None
         carregador.mp_pos_id = carregador.mp_pos_external_id = None
+    renomeou = "nome_local" in campos and campos["nome_local"] != carregador.nome_local
     for campo, valor in campos.items():
         setattr(carregador, campo, valor)
     db.commit()
     db.refresh(carregador)
-    return _serializar_carregador(carregador)
+    resposta = _serializar_carregador(carregador)
+    if renomeou and carregador.mp_pos_id:
+        # Igual o nome no app do Mercado Pago, para achar a loja/caixa certos.
+        try:
+            mercado_pago_caixa.renomear_no_mp(carregador)
+        except HTTPException as exc:
+            resposta["aviso_mp"] = f"Nome salvo aqui, mas o Mercado Pago recusou renomear: {exc.detail}"
+    return resposta
 
 
 @router.get("/carregadores/{carregador_id}/historico")
@@ -923,3 +931,15 @@ def excluir_carregador(carregador_id: str, db: Session = Depends(get_db)):
     db.commit()
     ocpp_server.desconectar(carregador_id)
     return {"ok": True, "modo": modo}
+
+
+@router.get("/carregadores/{carregador_id}/mercado-pago/caixa", dependencies=[Depends(exigir_admin)])
+def ver_caixa_mp(carregador_id: str, db: Session = Depends(get_db)):
+    """Nome atual da loja e do caixa no Mercado Pago."""
+    return mercado_pago_caixa.nomes_no_mp(_obter(db, carregador_id))
+
+
+@router.post("/carregadores/{carregador_id}/mercado-pago/renomear", dependencies=[Depends(exigir_admin)])
+def renomear_caixa_mp(carregador_id: str, db: Session = Depends(get_db)):
+    """Poe o nome do carregador na loja e no caixa do Mercado Pago."""
+    return mercado_pago_caixa.renomear_no_mp(_obter(db, carregador_id))

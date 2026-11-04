@@ -189,3 +189,24 @@ def test_cliente_guarda_public_key_client_id_e_secret(client):
     # Editar sem mandar o secret mantem o salvo.
     r = client.patch(f"/api/v1/admin/clientes/{r['id']}", json={"mp_client_id": "456"}, headers=ADMIN).json()
     assert r["mp_client_id"] == "456" and r["tem_client_secret"]
+
+
+def test_renomear_carregador_renomeia_loja_e_caixa_no_mp(client, monkeypatch):
+    _carregador_com_caixa(client, "CP-NOME", "POS-NOME")
+    chamadas = []
+
+    def mp_falso(method, url, token, body=None, headers=None, timeout=30):
+        chamadas.append((method, url, body))
+        if method == "GET" and "/stores/" in url:
+            return {"name": "Garagem GiraKids"}
+        if method == "GET" and "/pos/" in url:
+            return {"name": "Garagem GiraKids"}
+        return {}
+
+    monkeypatch.setattr(pagamentos, "mp_request", mp_falso)
+    r = client.patch("/api/v1/admin/carregadores/CP-NOME", json={"nome_local": "Garagem GiraKids"}, headers=ADMIN).json()
+    assert "aviso_mp" not in r
+    puts = [(url, body) for method, url, body in chamadas if method == "PUT"]
+    assert any(url.endswith("/stores/STORE-POS-NOME") and body == {"name": "Garagem GiraKids"} for url, body in puts)
+    assert any(url.endswith("/pos/POS-NOME") and body == {"name": "Garagem GiraKids"} for url, body in puts)
+    assert client.get("/api/v1/admin/carregadores/CP-NOME/mercado-pago/caixa", headers=ADMIN).json() == {"loja": "Garagem GiraKids", "caixa": "Garagem GiraKids"}

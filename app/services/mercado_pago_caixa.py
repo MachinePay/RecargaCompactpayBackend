@@ -113,6 +113,38 @@ def _criar_loja(carregador: Carregador, token: str, endereco: dict) -> dict:
     return {"mp_user_id": user_id, "mp_store_id": str(loja.get("id") or ""), "mp_store_external_id": loja.get("external_id") or external_id}
 
 
+def nomes_no_mp(carregador: Carregador) -> dict:
+    """Como a loja e o caixa estao no Mercado Pago agora (para achar no app)."""
+    token = pagamentos.token_do_carregador(carregador)
+    if not token or not carregador.mp_pos_id:
+        return {"loja": None, "caixa": None}
+    resposta = {"loja": None, "caixa": None}
+    try:
+        resposta["loja"] = pagamentos.mp_request("GET", f"{pagamentos.MP_API}/stores/{carregador.mp_store_id}", token).get("name")
+    except HTTPException:
+        pass
+    try:
+        resposta["caixa"] = pagamentos.mp_request("GET", f"{pagamentos.MP_API}/pos/{carregador.mp_pos_id}", token).get("name")
+    except HTTPException:
+        pass
+    return resposta
+
+
+def renomear_no_mp(carregador: Carregador) -> dict:
+    """Loja e caixa com o nome do carregador (ex.: "Garagem GiraKids")."""
+    token = pagamentos.token_do_carregador(carregador)
+    if not token or not carregador.mp_pos_id:
+        raise HTTPException(status_code=422, detail="Carregador sem loja e caixa no Mercado Pago")
+    pagamentos.mp_request(
+        "PUT",
+        f"{pagamentos.MP_API}/users/{urllib.parse.quote(str(carregador.mp_user_id))}/stores/{carregador.mp_store_id}",
+        token,
+        body={"name": carregador.nome_local[:45]},
+    )
+    pagamentos.mp_request("PUT", f"{pagamentos.MP_API}/pos/{carregador.mp_pos_id}", token, body={"name": carregador.nome_local[:44]})
+    return nomes_no_mp(carregador)
+
+
 def criar_loja_e_caixa(db, carregador: Carregador, endereco: dict | None = None) -> Carregador:
     token = pagamentos.token_do_carregador(carregador)
     if not token:
@@ -123,6 +155,7 @@ def criar_loja_e_caixa(db, carregador: Carregador, endereco: dict | None = None)
 
     external_id = _normalizar_external_id(f"EV{carregador.id_hardware}")
     caixa = _buscar(f"{pagamentos.MP_API}/pos?{urllib.parse.urlencode({'external_id': external_id})}", token)
+    ja_existia = caixa is not None
     ultimo_erro = None
     if caixa is None:
         corpo = {"name": carregador.nome_local[:44], "fixed_amount": False, "external_id": external_id}
@@ -153,6 +186,12 @@ def criar_loja_e_caixa(db, carregador: Carregador, endereco: dict | None = None)
     carregador.mp_store_external_id = loja["mp_store_external_id"]
     carregador.mp_pos_id = str(caixa.get("id") or "")
     carregador.mp_pos_external_id = caixa.get("external_id") or external_id
+    if ja_existia and caixa.get("name") != carregador.nome_local[:44]:
+        # Caixa reaproveitado de um cadastro anterior: fica com o nome atual.
+        try:
+            renomear_no_mp(carregador)
+        except HTTPException:
+            logging.warning("[MP caixa] nao renomeou loja/caixa de %s", carregador.id_hardware)
     registrar_historico(
         db,
         carregador.id_hardware,
