@@ -15,7 +15,7 @@ from datetime import timedelta
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, SessaoCarga, agora
-from app.services import ocpp_handlers, ocpp_server, pagamentos
+from app.services import ocpp_server, pagamentos, trava
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, registrar_historico
 
 START_RETRY_SECONDS = 10
@@ -77,10 +77,8 @@ def iniciar_sessao_para_cobranca(db, cobranca: Cobranca) -> SessaoCarga:
 
 
 def enviar_remote_start(db, sessao: SessaoCarga) -> bool:
-    # O bloqueio de carga sem pagamento deixou o conector Inoperative: a venda
-    # paga volta a disponibilizar antes de ligar.
-    if ocpp_handlers.liberar_bloqueio(sessao.carregador_id):
-        ocpp_server.enviar_chamada(sessao.carregador_id, "ChangeAvailability", {"connectorId": sessao.connector_id, "type": "Operative"})
+    # O conector fica travado fora de recarga paga (services/trava.py): libera antes de ligar.
+    trava.destravar_para_venda(sessao.carregador_id, sessao.connector_id)
     futuro = ocpp_server.enviar_chamada(
         sessao.carregador_id,
         "RemoteStartTransaction",
@@ -236,6 +234,9 @@ def processar_sessoes_uma_vez() -> None:
                 sessao.carregador_id
             ):
                 encerrar_sessao(db, sessao)
+
+        # Sem recarga paga, conector travado (nao carrega ao plugar).
+        trava.verificar(db)
     finally:
         db.close()
 

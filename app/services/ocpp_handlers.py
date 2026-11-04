@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from app.core.config import settings, tags_mestre
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, HistoricoOperacao, SessaoCarga, agora
+from app.services import trava
 
 STATUS_SESSAO_ANTES_DE_CARREGAR = ("aguardando_inicio", "aguardando_carro")
 STATUS_SESSAO_ATIVA = ("aguardando_inicio", "aguardando_carro", "carregando", "encerrando")
@@ -53,6 +54,7 @@ def registrar_historico(db, carregador_id: str, categoria: str, descricao: str, 
 
 
 def ao_conectar(charge_point_id: str) -> None:
+    trava.conectou(charge_point_id)
     db = SessionLocal()
     try:
         carregador = db.get(Carregador, charge_point_id)
@@ -65,6 +67,7 @@ def ao_conectar(charge_point_id: str) -> None:
 
 
 def ao_desconectar(charge_point_id: str) -> None:
+    trava.conectou(charge_point_id)  # limpa: ao voltar, trava de novo
     db = SessionLocal()
     try:
         registrar_historico(db, charge_point_id, "DISPOSITIVO", "Carregador desconectou do servidor OCPP")
@@ -107,6 +110,7 @@ def _boot_notification(db, carregador: Carregador, payload: dict) -> dict:
         "DISPOSITIVO",
         f"BootNotification: {carregador.vendor} {carregador.modelo} fw={carregador.firmware_version}",
     )
+    trava.apresentou(carregador.id_hardware)
     return {"status": "Accepted", "currentTime": _iso(agora()), "interval": settings.OCPP_HEARTBEAT_INTERVAL}
 
 
@@ -120,11 +124,6 @@ INTERVALO_BLOQUEIO = timedelta(seconds=30)
 STATUS_ENTREGANDO = ("Charging", "SuspendedEV", "SuspendedEVSE")
 
 
-def liberar_bloqueio(carregador_id: str) -> bool:
-    """True se o carregador tinha sido bloqueado (precisa voltar a Operative)."""
-    return _ultimo_bloqueio.pop(carregador_id, None) is not None
-
-
 def _tem_recarga_aberta(db, carregador: Carregador) -> bool:
     return (
         db.query(SessaoCarga.id)
@@ -135,10 +134,9 @@ def _tem_recarga_aberta(db, carregador: Carregador) -> bool:
 
 
 def _bloquear_carga_sem_pagamento(db, carregador: Carregador, transaction_id: int | None, motivo: str) -> None:
-    """O JST-901 em "plug and charge" carrega ao plugar, sem StartTransaction
-    (transactionId 0). Sem recarga paga aberta, manda parar: RemoteStop com o
-    transactionId que ele usou e, de reserva, deixa o conector indisponivel
-    ate a proxima venda (o RemoteStart volta a disponibilizar)."""
+    """Reserva da trava (services/trava.py): se mesmo assim ele carregar sem
+    recarga paga aberta (StartTransaction nem chega, transactionId 0), manda
+    parar e trava o conector ate a proxima venda."""
     if _tem_recarga_aberta(db, carregador):
         return
     momento = agora()
@@ -163,7 +161,7 @@ def _bloquear_carga_sem_pagamento(db, carregador: Carregador, transaction_id: in
         from app.services import ocpp_server  # ocpp_server importa este modulo
 
         ocpp_server.enviar_chamada(carregador_id, "RemoteStopTransaction", {"transactionId": tx})
-        ocpp_server.enviar_chamada(carregador_id, "ChangeAvailability", {"connectorId": conector, "type": "Inoperative"})
+        trava.travar(carregador_id, conector, "carregou sem recarga paga")
 
     threading.Timer(1.0, parar).start()
 

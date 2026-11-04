@@ -399,10 +399,53 @@ def test_stop_aceito_varias_vezes_sem_stop_transaction_encerra_a_sessao(client):
     assert _sessao(sessao_id).motivo_fim == "stop_sem_confirmacao"
 
 
-def test_carga_sem_recarga_paga_e_bloqueada(client):
-    # JST-901 em "plug and charge": carrega ao plugar, sem StartTransaction.
+def _em_paralelo(funcao):
+    """Chamada HTTP que espera o carregador responder: roda em outra thread."""
+    import threading
+
+    thread = threading.Thread(target=funcao)
+    thread.start()
+    return thread
+
+
+def test_conector_fica_travado_sem_recarga_paga(client, monkeypatch):
+    monkeypatch.setattr(sessoes.settings, "BLOQUEAR_CARGA_SEM_PAGAMENTO", True)
+    # JST-901 carrega sozinho ao plugar: fora de recarga paga o conector fica
+    # Inoperative; a venda destrava e, ao terminar, trava de novo.
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-TRAVA", "nome_local": "x"}, headers=ADMIN)
+    client.patch("/api/v1/admin/carregadores/CP-TRAVA", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
+    with client.websocket_connect("/CP-TRAVA") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        sessoes.processar_sessoes_uma_vez()
+        configuracoes = [cp.receber_chamada("ChangeConfiguration") for _ in range(5)]
+        assert {c[3]["key"] for c in configuracoes} >= {"AllowOfflineTxForUnknownId", "LocalAuthorizeOffline"}
+        trava = cp.receber_chamada("ChangeAvailability")
+        assert trava[3] == {"connectorId": 1, "type": "Inoperative"}
+        cp.responder(trava, {"status": "Accepted"})
+        _esperar(lambda: sessoes.trava.travado("CP-TRAVA"))
+
+        # Venda paga: Operative primeiro, so depois o RemoteStart.
+        venda = _em_paralelo(lambda: client.post("/api/v1/admin/carregadores/CP-TRAVA/simular-pagamento", json={"valor": 10}, headers=ADMIN))
+        destrava = cp.receber_chamada("ChangeAvailability")
+        assert destrava[3]["type"] == "Operative"
+        cp.responder(destrava, {"status": "Accepted"})
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        venda.join()
+        tx = cp.chamar("StartTransaction", {"idTag": start[3]["idTag"], "connectorId": 1, "timestamp": "2026-11-04T00:00:00Z", "meterStart": 0})["transactionId"]
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": tx, "timestamp": "2026-11-04T00:10:00Z", "meterStop": 100, "reason": "EVDisconnected"})
+
+        # Recarga terminou: trava de novo (depois do intervalo entre tentativas).
+        sessoes.trava._estado["CP-TRAVA"]["tentativa"] = None
+        sessoes.processar_sessoes_uma_vez()
+        assert cp.receber_chamada("ChangeAvailability")[3]["type"] == "Inoperative"
+
+
+def test_carga_sem_recarga_paga_e_bloqueada(client, monkeypatch):
+    monkeypatch.setattr(sessoes.settings, "BLOQUEAR_CARGA_SEM_PAGAMENTO", True)
+    # Reserva: se ele carregar mesmo assim (sem StartTransaction), manda parar.
     client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-PLUG", "nome_local": "x"}, headers=ADMIN)
-    client.patch("/api/v1/admin/carregadores/CP-PLUG", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
     with client.websocket_connect("/CP-PLUG") as ws:
         cp = CarregadorFake(ws)
         cp.ligar()
@@ -413,10 +456,5 @@ def test_carga_sem_recarga_paga_e_bloqueada(client):
         indisponivel = cp.receber_chamada("ChangeAvailability")
         assert indisponivel[3]["type"] == "Inoperative"
         cp.responder(indisponivel, {"status": "Accepted"})
-
-        # Venda paga: volta a disponibilizar antes de ligar.
-        client.post("/api/v1/admin/carregadores/CP-PLUG/simular-pagamento", json={"valor": 10}, headers=ADMIN)
-        assert cp.receber_chamada("ChangeAvailability")[3]["type"] == "Operative"
-        cp.responder(cp.receber_chamada("RemoteStartTransaction"), {"status": "Accepted"})
     historico = client.get("/api/v1/admin/carregadores/CP-PLUG/historico", headers=ADMIN).json()
     assert any("ALERTA: carregando sem recarga paga" in h["descricao"] for h in historico)
