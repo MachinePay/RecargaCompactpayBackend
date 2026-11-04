@@ -7,3 +7,4 @@ pydantic-settings
 websockets
 httpx
 pytest
+pyjwt

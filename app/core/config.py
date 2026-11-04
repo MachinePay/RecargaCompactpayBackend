@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # Chave das rotas /admin (cadastro de carregador, pacotes, terminais). Enquanto
     # o painel nao for integrado ao frontend da CompactPay, e' assim que se administra.
     ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
+    # Assinatura do login (JWT). Vazio: derivado da ADMIN_API_KEY.
+    JWT_SECRET: str = os.getenv("JWT_SECRET", "")
 
     # ---- Mercado Pago (cobranca na Point via Orders API, igual
     # /pagamentos/terminal/cobrar da CompactPay) ----

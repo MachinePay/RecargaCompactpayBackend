@@ -27,7 +27,8 @@ O `render.yaml` cria o servidor e o Postgres juntos.
    Vercel (ex.: `https://compactpay-recarga.vercel.app`, sem barra no fim).
    Se ainda nao tiver, preencha depois em Environment.
 3. A chave do painel (`ADMIN_API_KEY`) e' gerada pela Render: veja em
-   **Environment**.
+   **Environment**. Entre com ela, crie os usuarios (menu Usuarios) e depois
+   use e-mail e senha. Opcional: `JWT_SECRET` (senao deriva da chave de admin).
 4. Teste: `https://<seu-servico>.onrender.com/` responde `{"ok": true}`.
 
 Regras:

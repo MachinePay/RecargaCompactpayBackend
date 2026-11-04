@@ -51,6 +51,22 @@ class Cliente(Base):
     created_at = Column(DateTime, default=agora, nullable=False)
 
 
+class Usuario(Base):
+    """Login do painel (igual Usuarios da CompactPay). role admin ve tudo;
+    role cliente ve so os carregadores do cliente_id dele."""
+    __tablename__ = "usuarios"
+    id = Column(Integer, primary_key=True)
+    nome = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    senha_hash = Column(String, nullable=False)
+    role = Column(String, default="cliente", nullable=False)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), index=True, nullable=True)
+    cliente = relationship(Cliente)
+    ativo = Column(Boolean, default=True, nullable=False)
+    ultimo_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=agora, nullable=False)
+
+
 class Carregador(Base):
     __tablename__ = "carregadores"
     # ChargePointId: ultimo pedaco da URL ws://servidor/ocpp/<id_hardware>

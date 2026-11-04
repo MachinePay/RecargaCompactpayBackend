@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, agora
-from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, sessoes, sumup, terminais
+from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
+from app.services import auth, diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -31,9 +31,54 @@ def get_db():
         db.close()
 
 
-def exigir_admin(x_admin_key: str | None = Header(default=None)) -> None:
-    if not settings.ADMIN_API_KEY or not x_admin_key or not hmac.compare_digest(x_admin_key, settings.ADMIN_API_KEY):
+class Acesso(BaseModel):
+    """Quem esta usando o painel: admin (chave ou usuario admin) ou cliente."""
+    role: str
+    cliente_id: int | None = None
+    usuario_id: int | None = None
+    nome: str = "Administrador"
+
+    @property
+    def admin(self) -> bool:
+        return self.role == "admin"
+
+
+def acesso_atual(
+    x_admin_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> Acesso:
+    if x_admin_key:
+        if settings.ADMIN_API_KEY and hmac.compare_digest(x_admin_key, settings.ADMIN_API_KEY):
+            return Acesso(role="admin")
         raise HTTPException(status_code=401, detail="Chave de admin invalida")
+    if authorization and authorization.lower().startswith("bearer "):
+        dados = auth.ler_token(authorization[7:].strip())
+        usuario = db.get(Usuario, int(dados.get("sub") or 0))
+        if usuario is None or not usuario.ativo:
+            raise HTTPException(status_code=401, detail="Usuario desativado")
+        if usuario.role != "admin" and not usuario.cliente_id:
+            raise HTTPException(status_code=403, detail="Usuario sem cliente vinculado")
+        return Acesso(role=usuario.role, cliente_id=usuario.cliente_id, usuario_id=usuario.id, nome=usuario.nome)
+    raise HTTPException(status_code=401, detail="Entre no painel")
+
+
+def exigir_admin(acesso: Acesso = Depends(acesso_atual)) -> Acesso:
+    if not acesso.admin:
+        raise HTTPException(status_code=403, detail="So o administrador pode fazer isso")
+    return acesso
+
+
+def _carregadores_visiveis(db: Session, acesso: Acesso):
+    query = db.query(Carregador)
+    return query if acesso.admin else query.filter(Carregador.cliente_id == acesso.cliente_id)
+
+
+def _checar_acesso(db: Session, acesso: Acesso, carregador_id: str) -> Carregador:
+    carregador = db.get(Carregador, carregador_id)
+    if carregador is None or (not acesso.admin and carregador.cliente_id != acesso.cliente_id):
+        raise HTTPException(status_code=404, detail="Carregador nao encontrado")
+    return carregador
 
 
 BANCOS = ("mercado_pago", "sumup")
@@ -269,11 +314,11 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
     return resposta
 
 
-@router.get("/carregadores", dependencies=[Depends(exigir_admin)])
-def listar_carregadores(db: Session = Depends(get_db)):
+@router.get("/carregadores")
+def listar_carregadores(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
     resposta = []
     hoje = _indicadores_hoje(db)
-    for carregador in db.query(Carregador).order_by(Carregador.id_hardware).all():
+    for carregador in _carregadores_visiveis(db, acesso).order_by(Carregador.id_hardware).all():
         item = _serializar_carregador(carregador)
         item.update(hoje.get(carregador.id_hardware) or _indicadores_vazios())
         ativa = sessoes.sessao_ativa(db, carregador.id_hardware)
@@ -282,9 +327,9 @@ def listar_carregadores(db: Session = Depends(get_db)):
     return resposta
 
 
-@router.get("/carregadores/{carregador_id}", dependencies=[Depends(exigir_admin)])
-def obter_carregador(carregador_id: str, db: Session = Depends(get_db)):
-    carregador = _obter(db, carregador_id)
+@router.get("/carregadores/{carregador_id}")
+def obter_carregador(carregador_id: str, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    carregador = _checar_acesso(db, acesso, carregador_id)
     item = _serializar_carregador(carregador)
     item.update(_indicadores_hoje(db).get(carregador_id) or _indicadores_vazios())
     ativa = sessoes.sessao_ativa(db, carregador_id)
@@ -304,11 +349,12 @@ def listar_pacotes(carregador_id: str, db: Session = Depends(get_db)):
     return [{"id": p.id, "nome": p.nome, "minutos": p.minutos, "valor": p.valor, "ordem": p.ordem} for p in pacotes]
 
 
-@router.get("/resumo", dependencies=[Depends(exigir_admin)])
-def resumo(db: Session = Depends(get_db)):
+@router.get("/resumo")
+def resumo(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
     """Numeros do dashboard. "Hoje" e' o dia em UTC-3 (Brasilia)."""
     inicio_dia = (agora() - timedelta(hours=3)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=3)
-    carregadores = db.query(Carregador).filter(Carregador.ativo.is_(True)).all()
+    carregadores = _carregadores_visiveis(db, acesso).filter(Carregador.ativo.is_(True)).all()
+    ids = [c.id_hardware for c in _carregadores_visiveis(db, acesso).all()]
     vendas = (
         db.query(Cobranca)
         .filter(
@@ -316,18 +362,21 @@ def resumo(db: Session = Depends(get_db)):
             Cobranca.pago_em >= inicio_dia,
             Cobranca.estornada_em.is_(None),
             Cobranca.origem.in_(("point", "simulado", "caixa", "sumup")),
+            Cobranca.carregador_id.in_(ids),
         )
         .all()
     )
-    sessoes_hoje = db.query(SessaoCarga).filter(SessaoCarga.inicio >= inicio_dia).all()
+    sessoes_hoje = db.query(SessaoCarga).filter(SessaoCarga.inicio >= inicio_dia, SessaoCarga.carregador_id.in_(ids)).all()
     return {
         "carregadores_total": len(carregadores),
         "carregadores_online": sum(1 for c in carregadores if ocpp_server.esta_conectado(c.id_hardware)),
-        "sessoes_ativas": db.query(SessaoCarga).filter(SessaoCarga.status.in_(STATUS_SESSAO_ATIVA)).count(),
+        "sessoes_ativas": db.query(SessaoCarga).filter(SessaoCarga.status.in_(STATUS_SESSAO_ATIVA), SessaoCarga.carregador_id.in_(ids)).count(),
         "faturamento_hoje": round(sum(v.valor for v in vendas), 2),
         "vendas_hoje": len(vendas),
         "energia_hoje_kwh": round(sum(energia_kwh(s) for s in sessoes_hoje), 3),
-        "estornos_pendentes": db.query(Cobranca).filter(Cobranca.estorno_erro.isnot(None), Cobranca.estornada_em.is_(None)).count(),
+        "estornos_pendentes": db.query(Cobranca)
+        .filter(Cobranca.estorno_erro.isnot(None), Cobranca.estornada_em.is_(None), Cobranca.carregador_id.in_(ids))
+        .count(),
     }
 
 
@@ -348,8 +397,9 @@ def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Sessio
     return _serializar_carregador(carregador)
 
 
-@router.get("/carregadores/{carregador_id}/historico", dependencies=[Depends(exigir_admin)])
-def historico_carregador(carregador_id: str, limite: int = 100, db: Session = Depends(get_db)):
+@router.get("/carregadores/{carregador_id}/historico")
+def historico_carregador(carregador_id: str, limite: int = 100, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    _checar_acesso(db, acesso, carregador_id)
     itens = (
         db.query(HistoricoOperacao)
         .filter(HistoricoOperacao.carregador_id == carregador_id)
@@ -416,9 +466,11 @@ def revogar_terminal(terminal_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.get("/sessoes", dependencies=[Depends(exigir_admin)])
-def listar_sessoes(carregador_id: str | None = None, limite: int = 50, db: Session = Depends(get_db)):
+@router.get("/sessoes")
+def listar_sessoes(carregador_id: str | None = None, limite: int = 50, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
     query = db.query(SessaoCarga)
+    if not acesso.admin:
+        query = query.filter(SessaoCarga.carregador_id.in_([c.id_hardware for c in _carregadores_visiveis(db, acesso).all()]))
     if carregador_id:
         query = query.filter(SessaoCarga.carregador_id == carregador_id)
     lista = query.order_by(SessaoCarga.id.desc()).limit(min(limite, 500)).all()
@@ -625,9 +677,12 @@ def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
         cliente.mp_access_token = token
 
 
-@router.get("/clientes", dependencies=[Depends(exigir_admin)])
-def listar_clientes(db: Session = Depends(get_db)):
-    return [_serializar_cliente(c, db) for c in db.query(Cliente).order_by(Cliente.nome_empresa).all()]
+@router.get("/clientes")
+def listar_clientes(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    query = db.query(Cliente)
+    if not acesso.admin:
+        query = query.filter(Cliente.id == acesso.cliente_id)
+    return [_serializar_cliente(c, db) for c in query.order_by(Cliente.nome_empresa).all()]
 
 
 @router.post("/clientes", dependencies=[Depends(exigir_admin)])
@@ -653,7 +708,7 @@ def atualizar_cliente(cliente_id: int, dados: ClienteDados, db: Session = Depend
 
 # ---- Gestao (relatorio por periodo) --------------------------------------
 
-@router.get("/relatorio", dependencies=[Depends(exigir_admin)])
+@router.get("/relatorio")
 def relatorio(
     periodo: str = "7d",
     inicio: date | None = None,
@@ -662,9 +717,12 @@ def relatorio(
     carregador_id: str | None = None,
     incluir_simulados: bool = False,
     db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
 ):
     """Faturamento, graficos por dia e por hora, ranking e formas de pagamento.
     periodo: hoje, 7d, 30d, mes, mes_anterior ou personalizado (com inicio e fim)."""
+    if not acesso.admin:
+        cliente_id = acesso.cliente_id  # cliente so ve o proprio relatorio
     return relatorios.gerar(db, periodo, inicio, fim, cliente_id, carregador_id, incluir_simulados)
 
 
@@ -689,3 +747,107 @@ def parear_maquininha_sumup(cliente_id: int, dados: ParearSumup, db: Session = D
     """Codigo que aparece na maquininha (Conexoes > Wi-Fi > API > Conectar), vale 5 min."""
     cliente = _cliente_sumup(db, cliente_id)
     return sumup.parear_reader(cliente.sumup_api_key, cliente.sumup_merchant_code, dados.pairing_code, dados.nome)
+
+
+# ---- Quedas e saude ----------------------------------------------------
+
+@router.get("/quedas")
+def historico_quedas(
+    periodo: str = "7d",
+    inicio: date | None = None,
+    fim: date | None = None,
+    carregador_id: str | None = None,
+    cliente_id: int | None = None,
+    db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
+):
+    dia_ini, dia_fim = relatorios.intervalo(periodo, inicio, fim)
+    query = _carregadores_visiveis(db, acesso)
+    if cliente_id and acesso.admin:
+        query = query.filter(Carregador.cliente_id == cliente_id)
+    if carregador_id:
+        query = query.filter(Carregador.id_hardware == carregador_id)
+    carregadores = query.all()
+    lista = saude.quedas(db, carregadores, relatorios._utc(dia_ini), relatorios._utc(dia_fim + timedelta(days=1)))
+    return {
+        "periodo": {"inicio": dia_ini.isoformat(), "fim": dia_fim.isoformat()},
+        "quedas": lista,
+        "por_carregador": saude.resumo_quedas(lista, carregadores),
+    }
+
+
+@router.get("/saude")
+def saude_carregadores(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    return saude.saude(db, _carregadores_visiveis(db, acesso).all())
+
+
+# ---- Usuarios (login do painel) -----------------------------------------
+
+class UsuarioDados(BaseModel):
+    nome: str | None = Field(default=None, min_length=1, max_length=80)
+    email: str | None = Field(default=None, min_length=3, max_length=120)
+    senha: str | None = Field(default=None, min_length=6, max_length=120)
+    role: str | None = None
+    cliente_id: int | None = None
+    ativo: bool | None = None
+
+
+def _serializar_usuario(u: Usuario) -> dict:
+    return {
+        "id": u.id,
+        "nome": u.nome,
+        "email": u.email,
+        "role": u.role,
+        "cliente_id": u.cliente_id,
+        "cliente_nome": u.cliente.nome_empresa if u.cliente else None,
+        "ativo": u.ativo,
+        "ultimo_login": u.ultimo_login,
+        "created_at": u.created_at,
+    }
+
+
+def _aplicar_usuario(db: Session, usuario: Usuario, dados: UsuarioDados) -> None:
+    campos = dados.model_dump(exclude_unset=True)
+    if "email" in campos:
+        email = campos.pop("email").strip().lower()
+        outro = db.query(Usuario).filter(Usuario.email == email, Usuario.id != usuario.id).first()
+        if outro:
+            raise HTTPException(status_code=409, detail="Ja existe um usuario com esse e-mail")
+        usuario.email = email
+    if campos.get("senha"):
+        usuario.senha_hash = auth.hash_senha(campos.pop("senha"))
+    campos.pop("senha", None)
+    if "role" in campos and campos["role"] not in auth.PAPEIS:
+        raise HTTPException(status_code=422, detail="Papel invalido: admin ou cliente")
+    for campo, valor in campos.items():
+        setattr(usuario, campo, valor.strip() if isinstance(valor, str) else valor)
+    if usuario.role == "cliente" and (not usuario.cliente_id or db.get(Cliente, usuario.cliente_id) is None):
+        raise HTTPException(status_code=422, detail="Usuario de cliente precisa de um cliente vinculado")
+    if usuario.role == "admin":
+        usuario.cliente_id = None
+
+
+@router.get("/usuarios", dependencies=[Depends(exigir_admin)])
+def listar_usuarios(db: Session = Depends(get_db)):
+    return [_serializar_usuario(u) for u in db.query(Usuario).order_by(Usuario.nome).all()]
+
+
+@router.post("/usuarios", dependencies=[Depends(exigir_admin)])
+def criar_usuario(dados: UsuarioDados, db: Session = Depends(get_db)):
+    if not (dados.nome and dados.email and dados.senha):
+        raise HTTPException(status_code=422, detail="Informe nome, e-mail e senha")
+    usuario = Usuario(nome=dados.nome, email="", senha_hash="", role=dados.role or "cliente")
+    _aplicar_usuario(db, usuario, dados)
+    db.add(usuario)
+    db.commit()
+    return _serializar_usuario(usuario)
+
+
+@router.patch("/usuarios/{usuario_id}", dependencies=[Depends(exigir_admin)])
+def atualizar_usuario(usuario_id: int, dados: UsuarioDados, db: Session = Depends(get_db)):
+    usuario = db.get(Usuario, usuario_id)
+    if usuario is None:
+        raise HTTPException(status_code=404, detail="Usuario nao encontrado")
+    _aplicar_usuario(db, usuario, dados)
+    db.commit()
+    return _serializar_usuario(usuario)
