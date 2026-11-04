@@ -75,6 +75,14 @@ def conectados() -> list[str]:
         return sorted(_conexoes)
 
 
+def desconectar(charge_point_id: str) -> None:
+    """Derruba a conexao (carregador excluido). Chamada de thread, fora do loop."""
+    with _lock:
+        conexao = _conexoes.get(charge_point_id)
+    if conexao is not None:
+        asyncio.run_coroutine_threadsafe(conexao.websocket.close(code=1008), conexao.loop)
+
+
 def info_conexao(charge_point_id: str) -> dict | None:
     """IP de onde o carregador conectou e desde quando esta online."""
     with _lock:

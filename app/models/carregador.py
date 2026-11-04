@@ -107,6 +107,9 @@ class Carregador(Base):
     preco_valor = Column(Float, nullable=True)
     preco_minutos = Column(Integer, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
+    # Excluido pelo painel mas com vendas no historico: some das telas e recusa
+    # a conexao, e as vendas antigas continuam nos relatorios.
+    excluido_em = Column(DateTime, nullable=True)
 
     # Preenchidos pelo proprio carregador (BootNotification/StatusNotification).
     vendor = Column(String, nullable=True)

@@ -72,3 +72,41 @@ def test_quedas_e_saude(client):
     item = next(c for c in s["carregadores"] if c["id_hardware"] == "CP-QUEDA2")
     assert item["status"] == "critico" and any("Offline" in a["texto"] or "Nunca" in a["texto"] for a in item["alertas"])
     assert any("preco" in a["texto"] for a in item["alertas"])
+
+
+def test_excluir_carregador_apaga_ou_arquiva(client):
+    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono Ex", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    novo = {"nome_local": "Ex", "cliente_id": cliente["id"]}
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-EX-VAZIO", **novo}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-EX-VENDEU", **novo}, headers=ADMIN)
+    client.patch("/api/v1/admin/carregadores/CP-EX-VENDEU", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
+
+    # Sem historico: apaga de vez.
+    assert client.delete("/api/v1/admin/carregadores/CP-EX-VAZIO", headers=ADMIN).json()["modo"] == "apagado"
+    assert client.get("/api/v1/admin/carregadores/CP-EX-VAZIO", headers=ADMIN).status_code == 404
+
+    with client.websocket_connect("/CP-EX-VENDEU") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        client.post("/api/v1/admin/carregadores/CP-EX-VENDEU/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        cp.responder(cp.receber_chamada("RemoteStartTransaction"), {"status": "Accepted"})
+        # Com recarga em andamento nao exclui.
+        assert client.delete("/api/v1/admin/carregadores/CP-EX-VENDEU", headers=ADMIN).status_code == 409
+        sessao = client.get("/api/v1/admin/carregadores/CP-EX-VENDEU", headers=ADMIN).json()["sessao_ativa"]
+        client.post(f"/api/v1/admin/sessoes/{sessao['id']}/encerrar", headers=ADMIN)
+
+    # Com vendas: arquiva (some da lista, recusa conexao, vendas ficam).
+    assert client.delete("/api/v1/admin/carregadores/CP-EX-VENDEU", headers=ADMIN).json()["modo"] == "arquivado"
+    assert "CP-EX-VENDEU" not in [c["id_hardware"] for c in client.get("/api/v1/admin/carregadores", headers=ADMIN).json()]
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/CP-EX-VENDEU") as ws:
+            ws.receive_json()
+    rel = client.get("/api/v1/admin/relatorio?periodo=hoje&incluir_simulados=true", headers=ADMIN).json()
+    # Encerrada antes de comecar: foi estornada, mas continua no historico.
+    assert any(r["id_hardware"] == "CP-EX-VENDEU" and r["vendas"] + r["estornos_qtd"] == 1 for r in rel["ranking"])
+
+    # O mesmo ID pode ser cadastrado de novo, sem a configuracao antiga.
+    r = client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-EX-VENDEU", **novo}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["preco_valor"] is None

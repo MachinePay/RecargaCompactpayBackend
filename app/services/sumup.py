@@ -126,6 +126,7 @@ def processar_cliente(db, cliente: Cliente) -> None:
         .filter(
             Carregador.cliente_id == cliente.id,
             Carregador.banco_pagamento == "sumup",
+            Carregador.excluido_em.is_(None),
             or_(Carregador.sumup_reader_id.isnot(None), Carregador.sumup_device_code.isnot(None), Carregador.sumup_usuario.isnot(None)),
         )
         .all()

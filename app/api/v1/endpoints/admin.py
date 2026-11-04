@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
 from app.services import auth, diagnostico, geo, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
-from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
+from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh, registrar_historico
 from app.api.v1.endpoints.tablet import serializar_sessao
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -70,13 +70,13 @@ def exigir_admin(acesso: Acesso = Depends(acesso_atual)) -> Acesso:
 
 
 def _carregadores_visiveis(db: Session, acesso: Acesso):
-    query = db.query(Carregador)
+    query = db.query(Carregador).filter(Carregador.excluido_em.is_(None))
     return query if acesso.admin else query.filter(Carregador.cliente_id == acesso.cliente_id)
 
 
 def _checar_acesso(db: Session, acesso: Acesso, carregador_id: str) -> Carregador:
     carregador = db.get(Carregador, carregador_id)
-    if carregador is None or (not acesso.admin and carregador.cliente_id != acesso.cliente_id):
+    if carregador is None or carregador.excluido_em is not None or (not acesso.admin and carregador.cliente_id != acesso.cliente_id):
         raise HTTPException(status_code=404, detail="Carregador nao encontrado")
     return carregador
 
@@ -273,7 +273,8 @@ def _obter(db: Session, carregador_id: str) -> Carregador:
 
 @router.post("/carregadores", dependencies=[Depends(exigir_admin)])
 def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
-    if db.get(Carregador, dados.id_hardware):
+    existente = db.get(Carregador, dados.id_hardware)
+    if existente is not None and existente.excluido_em is None:
         raise HTTPException(status_code=409, detail="Carregador ja cadastrado")
     cliente = db.get(Cliente, dados.cliente_id)
     if cliente is None:
@@ -284,8 +285,7 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail="Este cliente nao esta configurado para esse banco (veja Clientes)")
     if dados.banco_pagamento == "sumup" and not (dados.sumup_reader_id or dados.sumup_device_code):
         raise HTTPException(status_code=422, detail="Escolha a maquininha SumUp (pareada ou pelo serial)")
-    carregador = Carregador(
-        id_hardware=dados.id_hardware,
+    campos = dict(
         nome_local=dados.nome_local,
         connector_id=dados.connector_id,
         mp_terminal_id=dados.mp_terminal_id,
@@ -296,6 +296,19 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         sumup_device_code=(dados.sumup_device_code or "").strip() or None,
         sumup_usuario=(dados.sumup_usuario or "").strip() or None,
     )
+    if existente is not None:
+        # ID de um carregador excluido (que tinha vendas): volta a valer como
+        # cadastro novo, sem a configuracao antiga; o historico continua.
+        carregador = existente
+        for campo in ("mp_user_id", "mp_store_id", "mp_store_external_id", "mp_pos_id", "mp_pos_external_id",
+                      "preco_valor", "preco_minutos", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
+            setattr(carregador, campo, None)
+        for campo, valor in campos.items():
+            setattr(carregador, campo, valor)
+        carregador.excluido_em = None
+        carregador.ativo = True
+    else:
+        carregador = Carregador(id_hardware=dados.id_hardware, **campos)
     if (dados.cep or "").strip():
         # Opcional: endereco e ponto aproximado no mapa. Falhar aqui nao impede o cadastro.
         try:
@@ -310,7 +323,8 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         # Senha curta o bastante para digitar no app do fabricante.
         senha = terminais.gerar_chave("")[:20]
         carregador.ocpp_senha_hash = terminais.hash_chave(senha)
-    db.add(carregador)
+    if existente is None:
+        db.add(carregador)
     db.commit()
     aviso_caixa = None
     if carregador.banco_pagamento == "mercado_pago":
@@ -871,3 +885,31 @@ def atualizar_usuario(usuario_id: int, dados: UsuarioDados, db: Session = Depend
 def consultar_cep(cep: str, numero: str | None = None):
     """Endereco e coordenadas aproximadas do CEP (para o mapa)."""
     return geo.buscar_cep(cep, (numero or "").strip() or None)
+
+
+@router.delete("/carregadores/{carregador_id}", dependencies=[Depends(exigir_admin)])
+def excluir_carregador(carregador_id: str, db: Session = Depends(get_db)):
+    """Sem vendas nem recargas: apaga de vez. Com historico: some das telas e
+    para de aceitar conexao, mas as vendas antigas ficam nos relatorios."""
+    carregador = db.get(Carregador, carregador_id)
+    if carregador is None or carregador.excluido_em is not None:
+        raise HTTPException(status_code=404, detail="Carregador nao encontrado")
+    if sessoes.sessao_ativa(db, carregador_id) is not None:
+        raise HTTPException(status_code=409, detail="Tem uma recarga em andamento: encerre antes de excluir")
+    tem_historico = (
+        db.query(Cobranca.id).filter(Cobranca.carregador_id == carregador_id).first()
+        or db.query(SessaoCarga.id).filter(SessaoCarga.carregador_id == carregador_id).first()
+    )
+    if tem_historico:
+        carregador.excluido_em = agora()
+        carregador.ativo = False
+        registrar_historico(db, carregador_id, "DISPOSITIVO", "Carregador excluido pelo painel (historico mantido)")
+        modo = "arquivado"
+    else:
+        db.query(PacoteTempo).filter(PacoteTempo.carregador_id == carregador_id).delete(synchronize_session=False)
+        db.query(HistoricoOperacao).filter(HistoricoOperacao.carregador_id == carregador_id).delete(synchronize_session=False)
+        db.delete(carregador)
+        modo = "apagado"
+    db.commit()
+    ocpp_server.desconectar(carregador_id)
+    return {"ok": True, "modo": modo}

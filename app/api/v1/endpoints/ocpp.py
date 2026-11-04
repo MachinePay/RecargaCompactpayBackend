@@ -31,7 +31,7 @@ def _motivo_recusa(charge_point_id: str, authorization: str | None) -> str | Non
     db = SessionLocal()
     try:
         carregador = db.get(Carregador, charge_point_id)
-        if carregador is None:
+        if carregador is None or carregador.excluido_em is not None:
             return "nao_cadastrado"
         if not carregador.ativo:
             return "inativo"

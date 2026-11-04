@@ -196,7 +196,7 @@ def carregador_do_pagamento(db, pagamento: dict) -> tuple[Carregador | None, str
     if not tem_caixa and not tem_loja:
         return None, "pagamento sem caixa/loja"
     candidatos = []
-    for carregador in db.query(Carregador).filter(Carregador.mp_pos_id.isnot(None)).all():
+    for carregador in db.query(Carregador).filter(Carregador.mp_pos_id.isnot(None), Carregador.excluido_em.is_(None)).all():
         caixa = carregador.mp_pos_id in ids["pos_ids"] or (carregador.mp_pos_external_id or "") in ids["pos_external_ids"]
         loja = carregador.mp_store_id in ids["store_ids"] or (carregador.mp_store_external_id or "") in ids["store_external_ids"]
         if (caixa and loja) if (tem_caixa and tem_loja) else (caixa if tem_caixa else loja):
