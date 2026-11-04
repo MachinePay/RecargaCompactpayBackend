@@ -4,7 +4,7 @@ Fica assim ate o painel ser integrado ao frontend da CompactPay."""
 import concurrent.futures
 import hmac
 import socket
-from datetime import timedelta
+from datetime import date, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, agora
-from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, sessoes, terminais
+from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, sessoes, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -580,3 +580,20 @@ def atualizar_cliente(cliente_id: int, dados: ClienteDados, db: Session = Depend
     _aplicar_dados_cliente(cliente, dados)
     db.commit()
     return _serializar_cliente(cliente, db)
+
+
+# ---- Gestao (relatorio por periodo) --------------------------------------
+
+@router.get("/relatorio", dependencies=[Depends(exigir_admin)])
+def relatorio(
+    periodo: str = "7d",
+    inicio: date | None = None,
+    fim: date | None = None,
+    cliente_id: int | None = None,
+    carregador_id: str | None = None,
+    incluir_simulados: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Faturamento, graficos por dia e por hora, ranking e formas de pagamento.
+    periodo: hoje, 7d, 30d, mes, mes_anterior ou personalizado (com inicio e fim)."""
+    return relatorios.gerar(db, periodo, inicio, fim, cliente_id, carregador_id, incluir_simulados)
