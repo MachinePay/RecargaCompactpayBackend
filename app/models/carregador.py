@@ -65,6 +65,10 @@ class Carregador(Base):
     mp_store_external_id = Column(String, nullable=True)
     mp_pos_id = Column(String, nullable=True)
     mp_pos_external_id = Column(String, nullable=True)
+    # Onde o carregador esta (mapa do painel).
+    endereco = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
     # Regra de preco do caixa: preco_valor reais liberam preco_minutos minutos,
     # proporcional (ex.: 10 = 20 min -> R$ 5 da 10 min, R$ 25 da 50 min).
     preco_valor = Column(Float, nullable=True)

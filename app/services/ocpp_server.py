@@ -26,6 +26,7 @@ from uuid import uuid4
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
 
+from app.models.carregador import agora
 from app.services import diagnostico, ocpp_handlers
 
 CALL = 2
@@ -51,10 +52,12 @@ class ErroOcpp(Exception):
 
 
 class ConexaoCarregador:
-    def __init__(self, charge_point_id: str, websocket: WebSocket, loop: asyncio.AbstractEventLoop):
+    def __init__(self, charge_point_id: str, websocket: WebSocket, loop: asyncio.AbstractEventLoop, ip: str | None = None):
         self.charge_point_id = charge_point_id
         self.websocket = websocket
         self.loop = loop
+        self.ip = ip
+        self.desde = agora()
         self.pendentes: dict[str, tuple[str, concurrent.futures.Future]] = {}
 
 
@@ -70,6 +73,13 @@ def esta_conectado(charge_point_id: str) -> bool:
 def conectados() -> list[str]:
     with _lock:
         return sorted(_conexoes)
+
+
+def info_conexao(charge_point_id: str) -> dict | None:
+    """IP de onde o carregador conectou e desde quando esta online."""
+    with _lock:
+        conexao = _conexoes.get(charge_point_id)
+    return {"ip": conexao.ip, "desde": conexao.desde} if conexao else None
 
 
 def enviar_chamada(charge_point_id: str, acao: str, payload: dict) -> concurrent.futures.Future | None:
@@ -109,9 +119,9 @@ def enviar_chamada(charge_point_id: str, acao: str, payload: dict) -> concurrent
     return futuro
 
 
-async def atender_conexao(websocket: WebSocket, charge_point_id: str) -> None:
+async def atender_conexao(websocket: WebSocket, charge_point_id: str, ip: str | None = None) -> None:
     """Loop de uma conexao ja aceita, ate o carregador desconectar."""
-    conexao = ConexaoCarregador(charge_point_id, websocket, asyncio.get_running_loop())
+    conexao = ConexaoCarregador(charge_point_id, websocket, asyncio.get_running_loop(), ip)
     with _lock:
         antiga = _conexoes.get(charge_point_id)
         _conexoes[charge_point_id] = conexao

@@ -53,6 +53,9 @@ class CarregadorUpdate(BaseModel):
     mp_access_token: str | None = None
     ativo: bool | None = None
     cliente_id: int | None = None
+    endereco: str | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
     preco_valor: float | None = Field(default=None, gt=0)
     preco_minutos: int | None = Field(default=None, gt=0, le=24 * 60)
 
@@ -105,14 +108,67 @@ class ComandoOcpp(BaseModel):
     payload: dict = {}
 
 
+def _inicio_do_dia():
+    """Meia-noite de hoje em Brasilia (UTC-3), em UTC sem fuso."""
+    return (agora() - timedelta(hours=3)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=3)
+
+
+def _indicadores_hoje(db: Session) -> dict[str, dict]:
+    """Vendas, energia e quedas de hoje por carregador (uma consulta por tipo)."""
+    inicio = _inicio_do_dia()
+    por_carregador: dict[str, dict] = {}
+
+    def item(carregador_id: str) -> dict:
+        return por_carregador.setdefault(
+            carregador_id, {"faturamento_hoje": 0.0, "vendas_hoje": 0, "recargas_hoje": 0, "energia_hoje_kwh": 0.0, "quedas_hoje": 0}
+        )
+
+    vendas = (
+        db.query(Cobranca)
+        .filter(
+            Cobranca.status == "aprovada",
+            Cobranca.pago_em >= inicio,
+            Cobranca.estornada_em.is_(None),
+            Cobranca.origem.in_(("point", "simulado", "caixa")),
+        )
+        .all()
+    )
+    for venda in vendas:
+        dados = item(venda.carregador_id)
+        dados["faturamento_hoje"] = round(dados["faturamento_hoje"] + venda.valor, 2)
+        dados["vendas_hoje"] += 1
+    for sessao in db.query(SessaoCarga).filter(SessaoCarga.inicio >= inicio).all():
+        dados = item(sessao.carregador_id)
+        dados["recargas_hoje"] += 1
+        dados["energia_hoje_kwh"] = round(dados["energia_hoje_kwh"] + energia_kwh(sessao), 3)
+    quedas = (
+        db.query(HistoricoOperacao)
+        .filter(HistoricoOperacao.created_at >= inicio, HistoricoOperacao.descricao == "Carregador desconectou do servidor OCPP")
+        .all()
+    )
+    for queda in quedas:
+        item(queda.carregador_id)["quedas_hoje"] += 1
+    return por_carregador
+
+
+def _indicadores_vazios() -> dict:
+    return {"faturamento_hoje": 0.0, "vendas_hoje": 0, "recargas_hoje": 0, "energia_hoje_kwh": 0.0, "quedas_hoje": 0}
+
+
 def _serializar_carregador(carregador: Carregador) -> dict:
+    conexao = ocpp_server.info_conexao(carregador.id_hardware)
     return {
         "id_hardware": carregador.id_hardware,
         "nome_local": carregador.nome_local,
         "connector_id": carregador.connector_id,
         "mp_terminal_id": carregador.mp_terminal_id,
         "ativo": carregador.ativo,
-        "online": ocpp_server.esta_conectado(carregador.id_hardware),
+        "online": conexao is not None,
+        "online_desde": conexao["desde"] if conexao else None,
+        "ip": conexao["ip"] if conexao else None,
+        "endereco": carregador.endereco,
+        "latitude": carregador.latitude,
+        "longitude": carregador.longitude,
         "status_conector": carregador.status_conector,
         "erro_conector": carregador.erro_conector,
         "vendor": carregador.vendor,
@@ -169,8 +225,10 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
 @router.get("/carregadores", dependencies=[Depends(exigir_admin)])
 def listar_carregadores(db: Session = Depends(get_db)):
     resposta = []
+    hoje = _indicadores_hoje(db)
     for carregador in db.query(Carregador).order_by(Carregador.id_hardware).all():
         item = _serializar_carregador(carregador)
+        item.update(hoje.get(carregador.id_hardware) or _indicadores_vazios())
         ativa = sessoes.sessao_ativa(db, carregador.id_hardware)
         item["sessao_ativa"] = serializar_sessao(ativa) if ativa else None
         resposta.append(item)
@@ -181,6 +239,7 @@ def listar_carregadores(db: Session = Depends(get_db)):
 def obter_carregador(carregador_id: str, db: Session = Depends(get_db)):
     carregador = _obter(db, carregador_id)
     item = _serializar_carregador(carregador)
+    item.update(_indicadores_hoje(db).get(carregador_id) or _indicadores_vazios())
     ativa = sessoes.sessao_ativa(db, carregador_id)
     item["sessao_ativa"] = serializar_sessao(ativa) if ativa else None
     return item
@@ -209,7 +268,7 @@ def resumo(db: Session = Depends(get_db)):
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio_dia,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado")),
+            Cobranca.origem.in_(("point", "simulado", "caixa")),
         )
         .all()
     )

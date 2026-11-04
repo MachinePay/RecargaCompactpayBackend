@@ -82,6 +82,6 @@ async def ocpp_websocket(websocket: WebSocket, caminho: str):
     await websocket.accept(subprotocol=SUBPROTOCOLO if SUBPROTOCOLO in pedidos else None)
     logging.info("[OCPP] carregador '%s' conectado", charge_point_id)
     diagnostico.registrar("aceita", charge_point_id, "Conexao aceita: carregador online", nivel="ok", ip=ip)
-    await ocpp_server.atender_conexao(websocket, charge_point_id)
+    await ocpp_server.atender_conexao(websocket, charge_point_id, ip)
     logging.info("[OCPP] carregador '%s' desconectado", charge_point_id)
     diagnostico.registrar("desconectou", charge_point_id, "Carregador desconectou", nivel="aviso", ip=ip)
