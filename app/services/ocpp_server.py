@@ -89,7 +89,10 @@ def enviar_chamada(charge_point_id: str, acao: str, payload: dict) -> concurrent
         # envio.result() abaixo travaria o proprio loop.
         raise RuntimeError("enviar_chamada nao pode ser chamada de dentro do loop do WebSocket")
 
-    msg_id = uuid4().hex
+    # UUID com hifens (36 caracteres), no mesmo formato que o carregador usa.
+    # O firmware do JST-901 ignorou nossas chamadas quando o id ia em hex puro
+    # (suspeita: parser de tamanho fixo).
+    msg_id = str(uuid4())
     futuro: concurrent.futures.Future = concurrent.futures.Future()
     conexao.pendentes[msg_id] = (acao, futuro)
     texto = _json([CALL, msg_id, acao, payload])
