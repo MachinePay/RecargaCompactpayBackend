@@ -220,6 +220,27 @@ def processar_sessoes_uma_vez() -> None:
             if sessao.created_at <= limite_inicio and sessao.minutos_pagos > 0:
                 falhar_sessao(db, sessao, "carro_nao_conectado")
 
+        # Pagou, o carregador abriu a transacao, mas o carro nunca puxou energia.
+        if settings.TEMPO_CONTA_COM_ENERGIA:
+            limite_energia = momento - timedelta(seconds=settings.TEMPO_PARA_PUXAR_ENERGIA_SEGUNDOS)
+            sem_energia = (
+                db.query(SessaoCarga)
+                .filter(
+                    SessaoCarga.status == "carregando",
+                    SessaoCarga.energia_desde.is_(None),
+                    SessaoCarga.minutos_pagos > 0,
+                    SessaoCarga.inicio <= limite_energia,
+                )
+                .all()
+            )
+            for sessao in sem_energia:
+                cobranca = db.get(Cobranca, sessao.cobranca_id)
+                registrar_historico(db, sessao.carregador_id, "SESSAO", f"Sessao {sessao.id}: o carro nao puxou energia; encerrando e estornando")
+                db.commit()
+                encerrar_sessao(db, sessao, "carro_nao_puxou_energia")
+                if settings.AUTO_ESTORNO:
+                    pagamentos.estornar_cobranca(db, cobranca)
+
         vencidas = (
             db.query(SessaoCarga)
             .filter(SessaoCarga.status == "carregando", SessaoCarga.fim_previsto.isnot(None), SessaoCarga.fim_previsto <= momento)

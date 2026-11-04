@@ -166,6 +166,26 @@ def _bloquear_carga_sem_pagamento(db, carregador: Carregador, transaction_id: in
     threading.Timer(1.0, parar).start()
 
 
+def _sessao_carregando(db, carregador: Carregador) -> SessaoCarga | None:
+    return (
+        db.query(SessaoCarga)
+        .filter(SessaoCarga.carregador_id == carregador.id_hardware, SessaoCarga.status == "carregando")
+        .order_by(SessaoCarga.id.desc())
+        .first()
+    )
+
+
+def _carro_puxou_energia(db, sessao: SessaoCarga | None, como: str) -> None:
+    """Primeira energia da recarga: comeca a contar o tempo pago."""
+    if sessao is None or sessao.status != "carregando" or sessao.energia_desde is not None:
+        return
+    momento = agora()
+    sessao.energia_desde = momento
+    if sessao.minutos_pagos > 0 and sessao.fim_previsto is None:
+        sessao.fim_previsto = momento + timedelta(minutes=sessao.minutos_pagos)
+    registrar_historico(db, sessao.carregador_id, "SESSAO", f"Sessao {sessao.id}: carro puxando energia ({como}), o tempo comecou a contar")
+
+
 def _status_notification(db, carregador: Carregador, payload: dict) -> dict:
     connector_id = _inteiro(payload.get("connectorId"))
     status = payload.get("status")
@@ -182,6 +202,8 @@ def _status_notification(db, carregador: Carregador, payload: dict) -> dict:
             )
         carregador.status_conector = status
         carregador.erro_conector = erro_gravado
+        if status == "Charging":
+            _carro_puxou_energia(db, _sessao_carregando(db, carregador), "status Charging")
         if status in STATUS_ENTREGANDO:
             _bloquear_carga_sem_pagamento(db, carregador, None, f"conector em {status}")
     elif connector_id == 0 and status == "Faulted":
@@ -243,7 +265,10 @@ def _start_transaction(db, carregador: Carregador, payload: dict) -> dict:
         "inicio": inicio,
         "connector_id": _inteiro(payload.get("connectorId")) or sessao.connector_id,
         "meter_inicio_wh": meter_start,
-        "fim_previsto": inicio + timedelta(minutes=sessao.minutos_pagos) if sessao.minutos_pagos > 0 else None,
+        # Contando so com energia, o fim e' marcado quando o carro puxar (_carro_puxou_energia).
+        "fim_previsto": inicio + timedelta(minutes=sessao.minutos_pagos)
+        if sessao.minutos_pagos > 0 and not settings.TEMPO_CONTA_COM_ENERGIA
+        else None,
     }
     # UPDATE condicional: se o worker acabou de dar a sessao como falha (e
     # estornar), a carga nao pode comecar.
@@ -319,8 +344,15 @@ def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
     sessao = db.get(SessaoCarga, transaction_id) if transaction_id is not None else None
     if sessao is None or sessao.carregador_id != carregador.id_hardware:
         if _corrente(payload) > 0.5:
-            _bloquear_carga_sem_pagamento(db, carregador, transaction_id, f"medindo {_corrente(payload):.1f} A, transactionId {transaction_id}")
+            aberta = _sessao_carregando(db, carregador)
+            if aberta is not None:
+                # Corrente com transactionId diferente durante a nossa recarga: conta como dela.
+                _carro_puxou_energia(db, aberta, f"{_corrente(payload):.1f} A")
+            else:
+                _bloquear_carga_sem_pagamento(db, carregador, transaction_id, f"medindo {_corrente(payload):.1f} A, transactionId {transaction_id}")
         return {}
+    if _corrente(payload) > 0.5:
+        _carro_puxou_energia(db, sessao, f"{_corrente(payload):.1f} A")
     for meter_value in payload.get("meterValue") or []:
         for amostra in meter_value.get("sampledValue") or []:
             # Sem measurand, o padrao do OCPP e' Energy.Active.Import.Register.

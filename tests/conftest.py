@@ -12,6 +12,7 @@ os.environ.setdefault("START_WHATSAPP_WORKER", "false")
 os.environ.setdefault("START_MP_CAIXA_POLLER", "false")
 # A trava do conector manda comandos extras; os testes dela ligam de novo.
 os.environ.setdefault("BLOQUEAR_CARGA_SEM_PAGAMENTO", "false")
+os.environ.setdefault("TEMPO_CONTA_COM_ENERGIA", "false")
 os.environ.setdefault("ADMIN_API_KEY", "admin-teste")
 os.environ.setdefault("MP_SIMULADO", "true")
 os.environ.setdefault("OCPP_TAGS_MESTRE", "RFID-MESTRE")

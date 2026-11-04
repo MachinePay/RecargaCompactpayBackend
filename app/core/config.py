@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # Tempo, depois do pagamento, para o carro ser plugado e a carga comecar
     # (StartTransaction). Passou disso: sessao falha e o pagamento e' estornado.
     TEMPO_MAXIMO_INICIO_SEGUNDOS: int = int(os.getenv("TEMPO_MAXIMO_INICIO_SEGUNDOS", "180"))
+    # O tempo pago so comeca a contar quando o carro puxa energia (status
+    # Charging ou corrente no MeterValues), e nao no StartTransaction: o JST-901
+    # abre a transacao no RemoteStart mesmo sem carro.
+    TEMPO_CONTA_COM_ENERGIA: bool = os.getenv("TEMPO_CONTA_COM_ENERGIA", "true").lower() == "true"
+    # Pagou e o carro nao puxou energia nesse tempo: encerra e estorna.
+    TEMPO_PARA_PUXAR_ENERGIA_SEGUNDOS: int = int(os.getenv("TEMPO_PARA_PUXAR_ENERGIA_SEGUNDOS", "300"))
     # Intervalo entre tentativas de RemoteStopTransaction ate o carregador confirmar.
     STOP_RETRY_SEGUNDOS: int = int(os.getenv("STOP_RETRY_SEGUNDOS", "15"))
     # Carregador carregando sem recarga paga aberta (modo "plug and charge" do

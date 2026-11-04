@@ -203,6 +203,9 @@ class SessaoCarga(Base):
     created_at = Column(DateTime, default=agora, nullable=False)
     start_enviado_em = Column(DateTime, nullable=True)
     inicio = Column(DateTime, nullable=True)
+    # Quando o carro comecou a puxar energia: e' dai que o tempo pago conta
+    # (com TEMPO_CONTA_COM_ENERGIA). Vazio = carro ainda nao puxou.
+    energia_desde = Column(DateTime, nullable=True)
     fim_previsto = Column(DateTime, nullable=True)
     fim_real = Column(DateTime, nullable=True)
     motivo_fim = Column(String, nullable=True)

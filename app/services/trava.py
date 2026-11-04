@@ -54,6 +54,14 @@ def apresentou(carregador_id: str) -> None:
         _item(carregador_id)["boot"] = True
 
 
+def marcar(carregador_id: str, esta_travado: bool) -> None:
+    """Estado vindo de um comando manual (tela de testes)."""
+    with _lock:
+        item = _item(carregador_id)
+        item["travado"] = esta_travado
+        item["tentativa"] = agora()
+
+
 def travado(carregador_id: str) -> bool:
     with _lock:
         return bool(_estado.get(carregador_id, {}).get("travado"))

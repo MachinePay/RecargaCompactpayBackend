@@ -458,3 +458,41 @@ def test_carga_sem_recarga_paga_e_bloqueada(client, monkeypatch):
         cp.responder(indisponivel, {"status": "Accepted"})
     historico = client.get("/api/v1/admin/carregadores/CP-PLUG/historico", headers=ADMIN).json()
     assert any("ALERTA: carregando sem recarga paga" in h["descricao"] for h in historico)
+
+
+def test_tempo_so_conta_quando_o_carro_puxa_energia(client, monkeypatch):
+    monkeypatch.setattr(sessoes.settings, "TEMPO_CONTA_COM_ENERGIA", True)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-ENERGIA", "nome_local": "x"}, headers=ADMIN)
+    client.patch("/api/v1/admin/carregadores/CP-ENERGIA", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
+    with client.websocket_connect("/CP-ENERGIA") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+
+        # Recarga 1: o carro puxa energia depois de um tempo plugado.
+        client.post("/api/v1/admin/carregadores/CP-ENERGIA/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        sessao_id = cp.chamar("StartTransaction", {"idTag": start[3]["idTag"], "connectorId": 1, "timestamp": "2026-11-04T00:00:00Z", "meterStart": 0})["transactionId"]
+        sessao = client.get("/api/v1/admin/carregadores/CP-ENERGIA", headers=ADMIN).json()["sessao_ativa"]
+        assert sessao["status"] == "carregando" and sessao["segundos_restantes"] is None
+        cp.chamar("StatusNotification", {"connectorId": 1, "errorCode": "NoError", "status": "Charging"})
+        sessao = client.get("/api/v1/admin/carregadores/CP-ENERGIA", headers=ADMIN).json()["sessao_ativa"]
+        assert 1190 <= sessao["segundos_restantes"] <= 1200
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": sessao_id, "timestamp": "2026-11-04T00:20:00Z", "meterStop": 100, "reason": "Local"})
+
+        # Recarga 2: o carro nunca puxa energia: encerra e estorna.
+        client.post("/api/v1/admin/carregadores/CP-ENERGIA/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        sessao_id = cp.chamar("StartTransaction", {"idTag": start[3]["idTag"], "connectorId": 1, "timestamp": "2026-11-04T01:00:00Z", "meterStart": 0})["transactionId"]
+        _alterar_sessao(sessao_id, inicio=agora() - timedelta(minutes=10))
+        sessoes.processar_sessoes_uma_vez()
+        cp.responder(cp.receber_chamada("RemoteStopTransaction"), {"status": "Accepted"})
+
+    db = SessionLocal()
+    try:
+        sessao = db.get(SessaoCarga, sessao_id)
+        assert sessao.motivo_fim == "carro_nao_puxou_energia"
+        assert db.get(Cobranca, sessao.cobranca_id).estornada_em is not None
+    finally:
+        db.close()

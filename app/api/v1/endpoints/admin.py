@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
-from app.services import auth, diagnostico, geo, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
+from app.services import auth, diagnostico, geo, trava, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh, registrar_historico
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -237,6 +237,7 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "mp_terminal_id": carregador.mp_terminal_id,
         "ativo": carregador.ativo,
         "online": conexao is not None,
+        "travado": trava.travado(carregador.id_hardware) if conexao is not None else None,
         "online_desde": conexao["desde"] if conexao else None,
         "ip": conexao["ip"] if conexao else None,
         "cep": carregador.cep,
@@ -943,3 +944,41 @@ def ver_caixa_mp(carregador_id: str, db: Session = Depends(get_db)):
 def renomear_caixa_mp(carregador_id: str, db: Session = Depends(get_db)):
     """Poe o nome do carregador na loja e no caixa do Mercado Pago."""
     return mercado_pago_caixa.renomear_no_mp(_obter(db, carregador_id))
+
+
+@router.post("/carregadores/{carregador_id}/travar", dependencies=[Depends(exigir_admin)])
+def travar_conector(carregador_id: str, db: Session = Depends(get_db)):
+    """Teste manual da trava: deixa o conector Inoperative (nao carrega ao plugar)."""
+    carregador = _obter(db, carregador_id)
+    if not ocpp_server.esta_conectado(carregador_id):
+        raise HTTPException(status_code=409, detail="Carregador offline")
+    if sessoes.sessao_ativa(db, carregador_id) is not None:
+        raise HTTPException(status_code=409, detail="Tem uma recarga em andamento")
+    futuro = ocpp_server.enviar_chamada(carregador_id, "ChangeAvailability", {"connectorId": carregador.connector_id, "type": "Inoperative"})
+    try:
+        resposta = futuro.result(timeout=OCPP_RESPOSTA_TIMEOUT_SECONDS) if futuro else {}
+    except concurrent.futures.TimeoutError:
+        raise HTTPException(status_code=504, detail="Carregador nao respondeu")
+    except ocpp_server.ErroOcpp as exc:
+        raise HTTPException(status_code=502, detail=f"Carregador respondeu erro: {exc.codigo} {exc.descricao}")
+    if (resposta or {}).get("status") in trava.RESPOSTAS_OK:
+        trava.marcar(carregador_id, True)
+    return {"resposta": resposta}
+
+
+@router.post("/carregadores/{carregador_id}/destravar", dependencies=[Depends(exigir_admin)])
+def destravar_conector(carregador_id: str, db: Session = Depends(get_db)):
+    """Teste manual: volta o conector a Operative. Sem recarga paga, o worker
+    trava de novo em ~30 s (BLOQUEAR_CARGA_SEM_PAGAMENTO)."""
+    carregador = _obter(db, carregador_id)
+    if not ocpp_server.esta_conectado(carregador_id):
+        raise HTTPException(status_code=409, detail="Carregador offline")
+    futuro = ocpp_server.enviar_chamada(carregador_id, "ChangeAvailability", {"connectorId": carregador.connector_id, "type": "Operative"})
+    try:
+        resposta = futuro.result(timeout=OCPP_RESPOSTA_TIMEOUT_SECONDS) if futuro else {}
+    except concurrent.futures.TimeoutError:
+        raise HTTPException(status_code=504, detail="Carregador nao respondeu")
+    except ocpp_server.ErroOcpp as exc:
+        raise HTTPException(status_code=502, detail=f"Carregador respondeu erro: {exc.codigo} {exc.descricao}")
+    trava.marcar(carregador_id, False)
+    return {"resposta": resposta}
