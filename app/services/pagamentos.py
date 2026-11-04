@@ -252,7 +252,25 @@ def cancelar_cobranca(db, cobranca: Cobranca) -> bool:
 def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
     if cobranca is None or cobranca.estornada_em or cobranca.status != "aprovada" or cobranca.valor <= 0:
         return False
-    if _usa_mercado_pago(cobranca) or cobranca.origem == "caixa":
+    if cobranca.origem == "sumup":
+        from app.services import sumup  # import local: sumup importa mercado_pago_caixa
+
+        carregador = db.get(Carregador, cobranca.carregador_id)
+        cliente = carregador.cliente if carregador else None
+        try:
+            sumup.estornar((cliente.sumup_api_key if cliente else "") or "", cobranca.mp_payment_id)
+        except Exception as exc:
+            cobranca.estorno_erro = str(exc)[:500]
+            registrar_historico(
+                db,
+                cobranca.carregador_id,
+                "PAGAMENTO",
+                f"ESTORNO FALHOU na cobranca {cobranca.id} (SumUp {cobranca.mp_payment_id}) - estornar manualmente no app da SumUp",
+                valor=cobranca.valor,
+            )
+            db.commit()
+            return False
+    elif _usa_mercado_pago(cobranca) or cobranca.origem == "caixa":
         carregador = db.get(Carregador, cobranca.carregador_id)
         # Venda do tablet estorna a order; pagamento direto na maquininha do
         # caixa estorna o payment.

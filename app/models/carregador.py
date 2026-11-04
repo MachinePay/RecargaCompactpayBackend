@@ -40,6 +40,13 @@ class Cliente(Base):
     mp_user_id = Column(String, nullable=True, index=True)
     # Categoria (MCC) que o MP aceitou no ultimo caixa criado.
     mp_pos_category = Column(Integer, nullable=True)
+    # Bancos que o cliente usa (igual cliente_mercado_pago/cliente_sumup da CompactPay).
+    cliente_mercado_pago = Column(Boolean, nullable=True)
+    cliente_sumup = Column(Boolean, nullable=True)
+    sumup_api_key = Column(String, nullable=True)
+    sumup_merchant_code = Column(String, nullable=True)
+    # Ate onde o poller ja leu o historico de transacoes da SumUp.
+    sumup_last_sync_at = Column(DateTime, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=agora, nullable=False)
 
@@ -56,6 +63,14 @@ class Carregador(Base):
     mp_terminal_id = Column(String, nullable=True)
     cliente_id = Column(Integer, ForeignKey("clientes.id"), index=True, nullable=True)
     cliente = relationship(Cliente)
+    # Banco da maquininha deste carregador: mercado_pago (loja/caixa) ou sumup.
+    # Vazio (carregador antigo) conta como mercado_pago.
+    banco_pagamento = Column(String, nullable=True)
+    # SumUp: reader pareado (id na API), serial da maquininha (card_reader.code
+    # do recibo) e operador logado nela (identifica o Pix, que vem sem serial).
+    sumup_reader_id = Column(String, nullable=True)
+    sumup_device_code = Column(String, nullable=True)
+    sumup_usuario = Column(String, nullable=True)
     # Token so deste carregador (legado). O normal e' o token do cliente.
     mp_access_token = Column(String, nullable=True)
     # Loja e caixa (POS) no MP, criados pelo painel. Pagamento aprovado numa

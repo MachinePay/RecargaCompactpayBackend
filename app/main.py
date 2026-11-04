@@ -13,6 +13,7 @@ from app.db.session import engine
 import app.models.carregador  # noqa: F401 - registra as tabelas para o create_all
 from app.services import diagnostico
 from app.services.pagamentos import start_cobrancas_poller
+from app.services.sumup import start_sumup_poller
 from app.services.sessoes import start_sessoes_worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -27,6 +28,7 @@ async def lifespan(_app: FastAPI):
         logging.warning("ADMIN_API_KEY vazio: rotas /admin ficam bloqueadas")
     start_sessoes_worker()
     start_cobrancas_poller()
+    start_sumup_poller()
     yield
 
 

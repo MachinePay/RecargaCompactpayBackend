@@ -213,7 +213,8 @@ def registrar_pagamento(db, carregador: Carregador, valor: float, payment_id: st
     - preparando outra recarga ou sem regra de preco: estorna."""
     from app.services import sessoes  # sessoes importa pagamentos
 
-    referencia = f"EV:{carregador.id_hardware}:pay:{payment_id}"
+    # Pagamento da SumUp tem prefixo proprio: o id dela nao pode colidir com um do MP.
+    referencia = f"EV:{carregador.id_hardware}:{'sumup' if origem == 'sumup' else 'pay'}:{payment_id}"
     with _trava_pagamento:
         if eh_postgres():
             db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": referencia})

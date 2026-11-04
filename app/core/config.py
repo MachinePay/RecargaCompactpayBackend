@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # Tags RFID que liberam carga sem pagamento (manutencao/dono), separadas por virgula.
     OCPP_TAGS_MESTRE: str = os.getenv("OCPP_TAGS_MESTRE", "")
 
+    # Poller da SumUp: pagamento digitado na maquininha nao gera webhook.
+    START_SUMUP_POLLER_WORKER: bool = os.getenv("START_SUMUP_POLLER_WORKER", "true").lower() == "true"
+    SUMUP_POLLER_INTERVAL_SECONDS: float = float(os.getenv("SUMUP_POLLER_INTERVAL_SECONDS", "10"))
+
     START_SESSOES_WORKER: bool = os.getenv("START_SESSOES_WORKER", "true").lower() == "true"
     SESSOES_WORKER_INTERVAL_SECONDS: float = float(os.getenv("SESSOES_WORKER_INTERVAL_SECONDS", "2"))
     START_COBRANCAS_POLLER_WORKER: bool = os.getenv("START_COBRANCAS_POLLER_WORKER", "true").lower() == "true"

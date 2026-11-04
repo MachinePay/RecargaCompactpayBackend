@@ -6,11 +6,11 @@ from app.db.migracoes import adicionar_colunas_faltando
 from app.db.session import SessionLocal
 from app.models.carregador import Cobranca, SessaoCarga
 from app.services import pagamentos
-from tests.test_fluxo_carga import ADMIN, CarregadorFake, _esperar, client  # noqa: F401 - fixture
+from tests.test_fluxo_carga import ADMIN, cliente_teste, CarregadorFake, _esperar, client  # noqa: F401 - fixture
 
 
 def _carregador_com_caixa(client, cp_id: str, pos_id: str) -> None:
-    client.post("/api/v1/admin/carregadores", json={"id_hardware": cp_id, "nome_local": "Garagem"}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": cp_id, "nome_local": "Garagem"}, headers=ADMIN)
     r = client.patch(
         f"/api/v1/admin/carregadores/{cp_id}",
         json={"preco_valor": 10, "preco_minutos": 20, "mp_access_token": "TEST-token"},
@@ -102,7 +102,7 @@ def test_pagamento_com_recarga_comecando_e_estornado(client, monkeypatch):
 
 
 def test_simular_pagamento_pelo_painel_usa_a_regra_de_preco(client):
-    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-SIMULA", "nome_local": "x"}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-SIMULA", "nome_local": "x"}, headers=ADMIN)
     assert client.post("/api/v1/admin/carregadores/CP-SIMULA/simular-pagamento", json={"valor": 10}, headers=ADMIN).status_code == 422
     client.patch("/api/v1/admin/carregadores/CP-SIMULA", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
     with client.websocket_connect("/CP-SIMULA") as ws:

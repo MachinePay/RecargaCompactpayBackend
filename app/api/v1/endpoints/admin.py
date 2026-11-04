@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, agora
-from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, sessoes, terminais
+from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, sessoes, sumup, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -36,13 +36,23 @@ def exigir_admin(x_admin_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Chave de admin invalida")
 
 
+BANCOS = ("mercado_pago", "sumup")
+
+
 class CarregadorCreate(BaseModel):
+    """Igual o cadastro de maquina da CompactPay: nasce dentro de um cliente,
+    com o banco da maquininha escolhido entre os que o cliente usa."""
     id_hardware: str = Field(min_length=1, max_length=48, pattern=r"^[A-Za-z0-9_\-.]+$")
     nome_local: str = Field(min_length=1, max_length=80)
+    cliente_id: int
+    banco_pagamento: str = "mercado_pago"
     connector_id: int = 1
+    # SumUp: reader pareado ou serial da maquininha; operador para o Pix.
+    sumup_reader_id: str | None = None
+    sumup_device_code: str | None = None
+    sumup_usuario: str | None = None
     mp_terminal_id: str | None = None
     mp_access_token: str | None = None
-    cliente_id: int | None = None
     gerar_senha_ocpp: bool = False
 
 
@@ -53,6 +63,9 @@ class CarregadorUpdate(BaseModel):
     mp_access_token: str | None = None
     ativo: bool | None = None
     cliente_id: int | None = None
+    sumup_reader_id: str | None = None
+    sumup_device_code: str | None = None
+    sumup_usuario: str | None = None
     endereco: str | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
@@ -71,9 +84,17 @@ class ClienteDados(BaseModel):
     endereco_estado: str | None = None
     endereco_latitude: float | None = None
     endereco_longitude: float | None = None
-    # Vazio na edicao = manter o token salvo.
+    cliente_mercado_pago: bool | None = None
+    cliente_sumup: bool | None = None
+    # Vazio na edicao = manter o que esta salvo.
     mp_access_token: str | None = None
+    sumup_api_key: str | None = None
     ativo: bool | None = None
+
+
+class ParearSumup(BaseModel):
+    pairing_code: str = Field(min_length=4, max_length=20)
+    nome: str | None = None
 
 
 class EnderecoLoja(BaseModel):
@@ -129,7 +150,7 @@ def _indicadores_hoje(db: Session) -> dict[str, dict]:
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa")),
+            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup")),
         )
         .all()
     )
@@ -179,6 +200,10 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "tem_senha_ocpp": bool(carregador.ocpp_senha_hash),
         "cliente_id": carregador.cliente_id,
         "cliente_nome": carregador.cliente.nome_empresa if carregador.cliente else None,
+        "banco_pagamento": carregador.banco_pagamento or "mercado_pago",
+        "sumup_reader_id": carregador.sumup_reader_id,
+        "sumup_device_code": carregador.sumup_device_code,
+        "sumup_usuario": carregador.sumup_usuario,
         "tem_token_mp": bool(pagamentos.token_do_carregador(carregador)),
         "preco_valor": carregador.preco_valor,
         "preco_minutos": carregador.preco_minutos,
@@ -200,8 +225,15 @@ def _obter(db: Session, carregador_id: str) -> Carregador:
 def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
     if db.get(Carregador, dados.id_hardware):
         raise HTTPException(status_code=409, detail="Carregador ja cadastrado")
-    if dados.cliente_id is not None and db.get(Cliente, dados.cliente_id) is None:
+    cliente = db.get(Cliente, dados.cliente_id)
+    if cliente is None:
         raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    if dados.banco_pagamento not in BANCOS:
+        raise HTTPException(status_code=422, detail="Banco invalido: use mercado_pago ou sumup")
+    if dados.banco_pagamento not in _bancos_do_cliente(cliente):
+        raise HTTPException(status_code=422, detail="Este cliente nao esta configurado para esse banco (veja Clientes)")
+    if dados.banco_pagamento == "sumup" and not (dados.sumup_reader_id or dados.sumup_device_code):
+        raise HTTPException(status_code=422, detail="Escolha a maquininha SumUp (pareada ou pelo serial)")
     carregador = Carregador(
         id_hardware=dados.id_hardware,
         nome_local=dados.nome_local,
@@ -209,6 +241,10 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         mp_terminal_id=dados.mp_terminal_id,
         mp_access_token=dados.mp_access_token,
         cliente_id=dados.cliente_id,
+        banco_pagamento=dados.banco_pagamento,
+        sumup_reader_id=(dados.sumup_reader_id or "").strip() or None,
+        sumup_device_code=(dados.sumup_device_code or "").strip() or None,
+        sumup_usuario=(dados.sumup_usuario or "").strip() or None,
     )
     senha = None
     if dados.gerar_senha_ocpp:
@@ -217,8 +253,19 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         carregador.ocpp_senha_hash = terminais.hash_chave(senha)
     db.add(carregador)
     db.commit()
+    aviso_caixa = None
+    if carregador.banco_pagamento == "mercado_pago":
+        # Igual CompactPay: a loja e o caixa nascem junto com a maquina. Se o MP
+        # recusar, o carregador fica cadastrado e da para tentar de novo na tela dele.
+        try:
+            mercado_pago_caixa.criar_loja_e_caixa(db, carregador)
+        except HTTPException as exc:
+            db.rollback()
+            aviso_caixa = str(exc.detail)
+    db.refresh(carregador)
     resposta = _serializar_carregador(carregador)
     resposta["senha_ocpp"] = senha  # aparece so agora
+    resposta["aviso_caixa"] = aviso_caixa
     return resposta
 
 
@@ -268,7 +315,7 @@ def resumo(db: Session = Depends(get_db)):
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio_dia,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa")),
+            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup")),
         )
         .all()
     )
@@ -518,8 +565,22 @@ def simular_pagamento_caixa(carregador_id: str, dados: PagamentoSimulado, db: Se
 
 # ---- Clientes (donos dos carregadores, com a conta do Mercado Pago) -----
 
+def _bancos_do_cliente(cliente: Cliente) -> list[str]:
+    bancos = []
+    if cliente.cliente_mercado_pago or (cliente.cliente_mercado_pago is None and cliente.mp_access_token):
+        bancos.append("mercado_pago")
+    if cliente.cliente_sumup:
+        bancos.append("sumup")
+    return bancos
+
+
 def _serializar_cliente(cliente: Cliente, db: Session) -> dict:
     return {
+        "bancos": _bancos_do_cliente(cliente),
+        "cliente_mercado_pago": "mercado_pago" in _bancos_do_cliente(cliente),
+        "cliente_sumup": bool(cliente.cliente_sumup),
+        "tem_sumup": bool(cliente.sumup_api_key and cliente.sumup_merchant_code),
+        "sumup_merchant_code": cliente.sumup_merchant_code,
         "id": cliente.id,
         "nome_empresa": cliente.nome_empresa,
         "email_contato": cliente.email_contato,
@@ -544,6 +605,14 @@ def _serializar_cliente(cliente: Cliente, db: Session) -> dict:
 def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
     campos = dados.model_dump(exclude_unset=True)
     token = (campos.pop("mp_access_token", None) or "").strip()
+    chave_sumup = (campos.pop("sumup_api_key", None) or "").strip()
+    if chave_sumup:
+        # Confere a chave e ja descobre o merchant_code (GET /v0.1/me).
+        try:
+            cliente.sumup_merchant_code = sumup.merchant_code(chave_sumup)
+        except HTTPException as exc:
+            raise HTTPException(status_code=422, detail=f"API key da SumUp recusada: {exc.detail}") from exc
+        cliente.sumup_api_key = chave_sumup
     for campo, valor in campos.items():
         setattr(cliente, campo, valor.strip() if isinstance(valor, str) else valor)
     if token:
@@ -597,3 +666,26 @@ def relatorio(
     """Faturamento, graficos por dia e por hora, ranking e formas de pagamento.
     periodo: hoje, 7d, 30d, mes, mes_anterior ou personalizado (com inicio e fim)."""
     return relatorios.gerar(db, periodo, inicio, fim, cliente_id, carregador_id, incluir_simulados)
+
+
+
+def _cliente_sumup(db: Session, cliente_id: int) -> Cliente:
+    cliente = db.get(Cliente, cliente_id)
+    if not cliente:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    if not (cliente.sumup_api_key and cliente.sumup_merchant_code):
+        raise HTTPException(status_code=422, detail="Cliente sem API key da SumUp")
+    return cliente
+
+
+@router.get("/clientes/{cliente_id}/sumup/readers", dependencies=[Depends(exigir_admin)])
+def listar_maquininhas_sumup(cliente_id: int, db: Session = Depends(get_db)):
+    cliente = _cliente_sumup(db, cliente_id)
+    return sumup.listar_readers(cliente.sumup_api_key, cliente.sumup_merchant_code)
+
+
+@router.post("/clientes/{cliente_id}/sumup/readers", dependencies=[Depends(exigir_admin)])
+def parear_maquininha_sumup(cliente_id: int, dados: ParearSumup, db: Session = Depends(get_db)):
+    """Codigo que aparece na maquininha (Conexoes > Wi-Fi > API > Conectar), vale 5 min."""
+    cliente = _cliente_sumup(db, cliente_id)
+    return sumup.parear_reader(cliente.sumup_api_key, cliente.sumup_merchant_code, dados.pairing_code, dados.nome)

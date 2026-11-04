@@ -3,12 +3,12 @@ from datetime import timedelta
 
 from app.db.session import SessionLocal
 from app.models.carregador import Cobranca, SessaoCarga, agora
-from tests.test_fluxo_carga import ADMIN, client  # noqa: F401 - fixture
+from tests.test_fluxo_carga import ADMIN, cliente_teste, client  # noqa: F401 - fixture
 
 
 def test_relatorio_soma_por_dia_hora_ranking_e_metodo(client):
     for cp in ("CP-REL-A", "CP-REL-B"):
-        client.post("/api/v1/admin/carregadores", json={"id_hardware": cp, "nome_local": cp}, headers=ADMIN)
+        client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": cp, "nome_local": cp}, headers=ADMIN)
     agora_utc = agora()
     db = SessionLocal()
     try:

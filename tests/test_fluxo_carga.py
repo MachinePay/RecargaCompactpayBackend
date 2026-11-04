@@ -48,8 +48,16 @@ class CarregadorFake:
         self.chamar("StatusNotification", {"connectorId": 1, "errorCode": "NoError", "status": status})
 
 
+def cliente_teste(client) -> int:
+    """Carregador nasce dentro de um cliente (igual CompactPay)."""
+    for c in client.get("/api/v1/admin/clientes", headers=ADMIN).json():
+        if c["nome_empresa"] == "Cliente teste":
+            return c["id"]
+    return client.post("/api/v1/admin/clientes", json={"nome_empresa": "Cliente teste", "cliente_mercado_pago": True}, headers=ADMIN).json()["id"]
+
+
 def _setup(client, cp_id: str, **extra) -> tuple[int, dict]:
-    r = client.post("/api/v1/admin/carregadores", json={"id_hardware": cp_id, "nome_local": "Posto teste", **extra}, headers=ADMIN)
+    r = client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": cp_id, "nome_local": "Posto teste", **extra}, headers=ADMIN)
     assert r.status_code == 200, r.text
     pacote = client.post(
         f"/api/v1/admin/carregadores/{cp_id}/pacotes", json={"nome": "30 min", "minutos": 30, "valor": 10}, headers=ADMIN
@@ -240,7 +248,7 @@ def test_carregador_nao_cadastrado_ou_com_senha_errada_e_recusado(client):
         with client.websocket_connect("/ocpp/NAO-EXISTE") as ws:
             ws.receive_json()
 
-    r = client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-SENHA", "nome_local": "x", "gerar_senha_ocpp": True}, headers=ADMIN)
+    r = client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-SENHA", "nome_local": "x", "gerar_senha_ocpp": True}, headers=ADMIN)
     senha = r.json()["senha_ocpp"]
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/ocpp/CP-SENHA") as ws:
@@ -324,7 +332,7 @@ def test_diagnostico_mostra_tentativa_recusada_conexao_e_mensagens(client):
     servidor = client.get("/api/v1/admin/diagnostico/servidor", headers=ADMIN).json()
     assert [i["id"] for i in servidor["ids_nao_cadastrados"]] == ["ID-ERRADO"]
 
-    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-DIAG", "nome_local": "x"}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-DIAG", "nome_local": "x"}, headers=ADMIN)
     # Sem /ocpp no caminho, como o app do JST-901 pode montar.
     with client.websocket_connect("/CP-DIAG") as ws:
         CarregadorFake(ws).ligar()
@@ -346,7 +354,7 @@ def test_diagnostico_mostra_tentativa_recusada_conexao_e_mensagens(client):
 
 def test_respostas_ocpp_saem_em_json_compacto(client):
     # Firmware do JST-901 nao entende JSON com espaco depois de ":" e ",".
-    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-COMPACTO", "nome_local": "x"}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-COMPACTO", "nome_local": "x"}, headers=ADMIN)
     with client.websocket_connect("/CP-COMPACTO") as ws:
         ws.send_text('[2,"1","BootNotification",{"chargePointVendor":"WGD","chargePointModel":"ICS_10"}]')
         texto = ws.receive_text()
@@ -356,7 +364,7 @@ def test_respostas_ocpp_saem_em_json_compacto(client):
 
 def test_stop_transaction_com_numeros_em_texto_encerra_a_sessao(client):
     # O JST-901 manda transactionId e meterStop como texto: "1", "0".
-    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-TEXTO", "nome_local": "x"}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-TEXTO", "nome_local": "x"}, headers=ADMIN)
     with client.websocket_connect("/CP-TEXTO") as ws:
         cp = CarregadorFake(ws)
         cp.ligar()
@@ -377,7 +385,7 @@ def test_stop_transaction_com_numeros_em_texto_encerra_a_sessao(client):
 def test_stop_aceito_varias_vezes_sem_stop_transaction_encerra_a_sessao(client):
     # JST-901: o StopTransaction se perdeu e o carregador responde Accepted a
     # todo RemoteStop seguinte, sem mandar o Stop de novo.
-    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-SEMSTOP", "nome_local": "x"}, headers=ADMIN)
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-SEMSTOP", "nome_local": "x"}, headers=ADMIN)
     with client.websocket_connect("/CP-SEMSTOP") as ws:
         cp = CarregadorFake(ws)
         cp.ligar()

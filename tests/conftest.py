@@ -7,6 +7,7 @@ from pathlib import Path
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{tempfile.mkdtemp()}/carregador-test.db")
 os.environ.setdefault("START_SESSOES_WORKER", "false")
 os.environ.setdefault("START_COBRANCAS_POLLER_WORKER", "false")
+os.environ.setdefault("START_SUMUP_POLLER_WORKER", "false")
 os.environ.setdefault("ADMIN_API_KEY", "admin-teste")
 os.environ.setdefault("MP_SIMULADO", "true")
 os.environ.setdefault("OCPP_TAGS_MESTRE", "RFID-MESTRE")
