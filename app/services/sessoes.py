@@ -21,6 +21,8 @@ from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, registrar_historico
 START_RETRY_SECONDS = 10
 # Depois de tantas tentativas de stop sem StopTransaction, avisa no historico.
 STOP_TENTATIVAS_ALERTA = 4
+# Status do conector em que ele com certeza nao esta entregando energia.
+CONECTOR_PARADO = ("Available", "Finishing", "Preparing", "Unavailable", "Faulted")
 
 
 def mudar_status(db, sessao: SessaoCarga, de: tuple[str, ...], para: str, **campos) -> bool:
@@ -145,12 +147,28 @@ def encerrar_sessao(db, sessao: SessaoCarga, motivo: str = "tempo_esgotado") -> 
 def _ao_responder_remote_stop(sessao_id: int, futuro) -> None:
     if futuro.exception() is not None:
         return
-    if (futuro.result() or {}).get("status") == "Accepted":
-        return  # agora e' esperar o StopTransaction
+    aceito = (futuro.result() or {}).get("status") == "Accepted"
     db = SessionLocal()
     try:
         sessao = db.get(SessaoCarga, sessao_id)
         if sessao is None or sessao.status != "encerrando":
+            return
+        if aceito:
+            # Normal: esperar o StopTransaction. Mas o JST-901 responde Accepted
+            # tambem para transacao que ja encerrou (e cujo StopTransaction se
+            # perdeu), e ai nunca mais manda o Stop. Com varias tentativas
+            # aceitas e o conector fora de carga, da a sessao por encerrada.
+            carregador = db.get(Carregador, sessao.carregador_id)
+            conector_parado = carregador is not None and carregador.status_conector in CONECTOR_PARADO
+            if sessao.stop_tentativas >= 3 and conector_parado:
+                if mudar_status(db, sessao, ("encerrando",), "finalizada", fim_real=agora(), motivo_fim="stop_sem_confirmacao"):
+                    registrar_historico(
+                        db,
+                        sessao.carregador_id,
+                        "SESSAO",
+                        f"ATENCAO: sessao {sessao.id} encerrada sem StopTransaction (carregador aceitou o stop e esta {carregador.status_conector})",
+                    )
+                    db.commit()
             return
         registrar_historico(db, sessao.carregador_id, "SESSAO", f"Sessao {sessao.id}: carregador recusou o RemoteStop")
         db.commit()

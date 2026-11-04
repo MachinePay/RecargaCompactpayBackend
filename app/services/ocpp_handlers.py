@@ -30,6 +30,19 @@ class AcaoNaoSuportada(Exception):
     pass
 
 
+def _inteiro(valor) -> int | None:
+    """Numero do OCPP. O firmware do JST-901 manda transactionId e meterStop
+    como texto ("1", "0") em vez de numero; aceita os dois."""
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, int):
+        return valor
+    try:
+        return int(float(str(valor).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _iso(momento: datetime) -> str:
     return momento.strftime("%Y-%m-%dT%H:%M:%S.") + f"{momento.microsecond // 1000:03d}Z"
 
@@ -101,7 +114,7 @@ def _heartbeat(db, carregador: Carregador, payload: dict) -> dict:
 
 
 def _status_notification(db, carregador: Carregador, payload: dict) -> dict:
-    connector_id = payload.get("connectorId")
+    connector_id = _inteiro(payload.get("connectorId"))
     status = payload.get("status")
     erro = payload.get("errorCode")
     # connectorId 0 e' o carregador inteiro; so guardamos o conector que vendemos.
@@ -144,7 +157,7 @@ def _authorize(db, carregador: Carregador, payload: dict) -> dict:
 
 def _start_transaction(db, carregador: Carregador, payload: dict) -> dict:
     id_tag = str(payload.get("idTag") or "")
-    meter_start = payload.get("meterStart")
+    meter_start = _inteiro(payload.get("meterStart"))
 
     # Reenvio do mesmo StartTransaction (a resposta anterior se perdeu): devolve
     # o mesmo transactionId em vez de abrir outra sessao.
@@ -173,8 +186,8 @@ def _start_transaction(db, carregador: Carregador, payload: dict) -> dict:
     campos = {
         "status": "carregando",
         "inicio": inicio,
-        "connector_id": payload.get("connectorId") or sessao.connector_id,
-        "meter_inicio_wh": meter_start if isinstance(meter_start, int) else None,
+        "connector_id": _inteiro(payload.get("connectorId")) or sessao.connector_id,
+        "meter_inicio_wh": meter_start,
         "fim_previsto": inicio + timedelta(minutes=sessao.minutos_pagos) if sessao.minutos_pagos > 0 else None,
     }
     # UPDATE condicional: se o worker acabou de dar a sessao como falha (e
@@ -223,8 +236,8 @@ def _abrir_sessao_tag_mestre(db, carregador: Carregador, id_tag: str) -> SessaoC
 
 
 def _stop_transaction(db, carregador: Carregador, payload: dict) -> dict:
-    transaction_id = payload.get("transactionId")
-    sessao = db.get(SessaoCarga, transaction_id) if isinstance(transaction_id, int) else None
+    transaction_id = _inteiro(payload.get("transactionId"))
+    sessao = db.get(SessaoCarga, transaction_id) if transaction_id is not None else None
     if sessao is None or sessao.carregador_id != carregador.id_hardware:
         registrar_historico(db, carregador.id_hardware, "SESSAO", f"StopTransaction de transacao desconhecida ({transaction_id})")
         return {}
@@ -233,7 +246,7 @@ def _stop_transaction(db, carregador: Carregador, payload: dict) -> dict:
     reason = payload.get("reason") or "Local"
     sessao.status = "finalizada"
     sessao.fim_real = agora()
-    sessao.meter_fim_wh = payload.get("meterStop") if isinstance(payload.get("meterStop"), int) else None
+    sessao.meter_fim_wh = _inteiro(payload.get("meterStop"))
     if sessao.meter_fim_wh is not None:
         sessao.meter_atual_wh = sessao.meter_fim_wh
     sessao.motivo_fim = sessao.motivo_fim or MOTIVOS_PARADA.get(reason, reason)
@@ -247,8 +260,8 @@ def _stop_transaction(db, carregador: Carregador, payload: dict) -> dict:
 
 
 def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
-    transaction_id = payload.get("transactionId")
-    sessao = db.get(SessaoCarga, transaction_id) if isinstance(transaction_id, int) else None
+    transaction_id = _inteiro(payload.get("transactionId"))
+    sessao = db.get(SessaoCarga, transaction_id) if transaction_id is not None else None
     if sessao is None or sessao.carregador_id != carregador.id_hardware:
         return {}
     for meter_value in payload.get("meterValue") or []:

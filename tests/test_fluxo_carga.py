@@ -352,3 +352,40 @@ def test_respostas_ocpp_saem_em_json_compacto(client):
         texto = ws.receive_text()
     assert texto.startswith('[3,"1",{"status":"Accepted"')
     assert ": " not in texto and ", " not in texto
+
+
+def test_stop_transaction_com_numeros_em_texto_encerra_a_sessao(client):
+    # O JST-901 manda transactionId e meterStop como texto: "1", "0".
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-TEXTO", "nome_local": "x"}, headers=ADMIN)
+    with client.websocket_connect("/CP-TEXTO") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        sessao_id = client.post("/api/v1/admin/carregadores/CP-TEXTO/sessao-teste", json={"minutos": 2}, headers=ADMIN).json()["id"]
+        cp.responder(cp.receber_chamada("RemoteStartTransaction"), {"status": "Accepted"})
+        inicio = cp.chamar("StartTransaction", {"idTag": f"EV{sessao_id}", "connectorId": 1, "timestamp": "2026-11-04T00:22:11Z", "meterStart": 0})
+        assert inicio["transactionId"] == sessao_id
+
+        client.post(f"/api/v1/admin/sessoes/{sessao_id}/encerrar", headers=ADMIN)
+        cp.responder(cp.receber_chamada("RemoteStopTransaction"), {"status": "Accepted"})
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": str(sessao_id), "timestamp": "2026-11-04T00:24:12Z", "meterStop": "1500"})
+
+    sessao = _sessao(sessao_id)
+    assert sessao.status == "finalizada"
+    assert sessao.meter_fim_wh == 1500
+
+
+def test_stop_aceito_varias_vezes_sem_stop_transaction_encerra_a_sessao(client):
+    # JST-901: o StopTransaction se perdeu e o carregador responde Accepted a
+    # todo RemoteStop seguinte, sem mandar o Stop de novo.
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-SEMSTOP", "nome_local": "x"}, headers=ADMIN)
+    with client.websocket_connect("/CP-SEMSTOP") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        sessao_id = client.post("/api/v1/admin/carregadores/CP-SEMSTOP/sessao-teste", json={"minutos": 2}, headers=ADMIN).json()["id"]
+        cp.responder(cp.receber_chamada("RemoteStartTransaction"), {"status": "Accepted"})
+        cp.chamar("StartTransaction", {"idTag": f"EV{sessao_id}", "connectorId": 1, "timestamp": "2026-11-04T00:22:11Z", "meterStart": 0})
+        for _ in range(3):
+            client.post(f"/api/v1/admin/sessoes/{sessao_id}/encerrar", headers=ADMIN)
+            cp.responder(cp.receber_chamada("RemoteStopTransaction"), {"status": "Accepted"})
+        _esperar(lambda: _sessao(sessao_id).status == "finalizada")
+    assert _sessao(sessao_id).motivo_fim == "stop_sem_confirmacao"
