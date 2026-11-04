@@ -35,6 +35,27 @@ STATUS_QUE_ACEITAM_APROVACAO = ("aguardando_pagamento", "expirada", "cancelada")
 _trava_aprovacao = threading.Lock()
 
 
+def _mensagem_erro_mp(status_code: int, corpo: str) -> str:
+    """Erro do MP com o motivo de verdade (igual _mp_error_message da
+    CompactPay). A correcao automatica de cidade da loja depende do texto
+    "city_name was invalid ... Valid values are:" vir aqui."""
+    try:
+        dados = json.loads(corpo) if corpo else {}
+    except ValueError:
+        dados = {"message": corpo}
+    if not isinstance(dados, dict):
+        dados = {"message": corpo}
+    codigo = str(dados.get("error") or dados.get("code") or "").strip()
+    mensagem = str(dados.get("message") or dados.get("description") or "sem detalhe").strip()
+    causas = " | ".join(
+        str(c.get("description") or c.get("message") or c.get("code") or "").strip()
+        for c in (dados.get("causes") if isinstance(dados.get("causes"), list) else [])
+        if isinstance(c, dict)
+    )
+    detalhe = f"{codigo}: {mensagem}" if codigo else mensagem
+    return f"Mercado Pago retornou erro {status_code}: {detalhe}" + (f" | {causas}" if causas.strip(" |") else "")
+
+
 def mp_request(method: str, url: str, token: str, body: dict | None = None, headers: dict | None = None, timeout: float = 30):
     req_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
     if headers:
@@ -48,7 +69,7 @@ def mp_request(method: str, url: str, token: str, body: dict | None = None, head
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="ignore")
         print(f"[Mercado Pago] {method} {url} falhou ({exc.code}): {error_body or 'erro sem detalhe'}")
-        raise HTTPException(status_code=502, detail=f"Mercado Pago recusou ({exc.code})") from exc
+        raise HTTPException(status_code=502, detail=_mensagem_erro_mp(exc.code, error_body)) from exc
 
 
 def token_do_carregador(carregador: Carregador) -> str:
