@@ -8,6 +8,7 @@ from app.api.v1.endpoints import ocpp
 from app.api.v1.routes import api_router
 from app.core.config import settings
 from app.db.base import Base
+from app.db.migracoes import adicionar_colunas_faltando
 from app.db.session import engine
 import app.models.carregador  # noqa: F401 - registra as tabelas para o create_all
 from app.services import diagnostico
@@ -21,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 async def lifespan(_app: FastAPI):
     # Mesmo esquema da CompactPay: sem Alembic, create_all no startup.
     Base.metadata.create_all(bind=engine)
+    adicionar_colunas_faltando(engine, Base)
     if not settings.ADMIN_API_KEY:
         logging.warning("ADMIN_API_KEY vazio: rotas /admin ficam bloqueadas")
     start_sessoes_worker()

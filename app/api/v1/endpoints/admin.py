@@ -5,6 +5,7 @@ import concurrent.futures
 import hmac
 import socket
 from datetime import timedelta
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, agora
-from app.services import diagnostico, ocpp_server, pagamentos, sessoes, terminais
+from app.services import diagnostico, mercado_pago_caixa, ocpp_server, pagamentos, sessoes, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -50,6 +51,20 @@ class CarregadorUpdate(BaseModel):
     mp_terminal_id: str | None = None
     mp_access_token: str | None = None
     ativo: bool | None = None
+    preco_valor: float | None = Field(default=None, gt=0)
+    preco_minutos: int | None = Field(default=None, gt=0, le=24 * 60)
+
+
+class EnderecoLoja(BaseModel):
+    """Endereco da loja no MP; vazio usa os MP_DEFAULT_STORE_* do servidor."""
+    rua: str | None = None
+    numero: str | None = None
+    cidade: str | None = None
+    estado: str | None = None
+
+
+class PagamentoSimulado(BaseModel):
+    valor: float = Field(gt=0)
 
 
 class PacoteCreate(BaseModel):
@@ -88,6 +103,13 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "firmware_version": carregador.firmware_version,
         "ultimo_sinal": carregador.ultimo_sinal,
         "tem_senha_ocpp": bool(carregador.ocpp_senha_hash),
+        "tem_token_mp": bool(pagamentos.token_do_carregador(carregador)),
+        "preco_valor": carregador.preco_valor,
+        "preco_minutos": carregador.preco_minutos,
+        "mp_store_id": carregador.mp_store_id,
+        "mp_store_external_id": carregador.mp_store_external_id,
+        "mp_pos_id": carregador.mp_pos_id,
+        "mp_pos_external_id": carregador.mp_pos_external_id,
     }
 
 
@@ -371,3 +393,34 @@ def diagnostico_eventos(desde: int = 0, carregador_id: str | None = None, limite
 def diagnostico_limpar():
     diagnostico.limpar()
     return {"ok": True}
+
+
+# ---- Caixa do Mercado Pago (venda direto na maquininha) -----------------
+
+@router.post("/carregadores/{carregador_id}/mercado-pago/caixa", dependencies=[Depends(exigir_admin)])
+def criar_caixa_mp(carregador_id: str, endereco: EnderecoLoja | None = None, db: Session = Depends(get_db)):
+    """Cria (ou reaproveita) a loja e o caixa do carregador no Mercado Pago.
+    Depois e' so vincular a maquininha a esse caixa no app do MP."""
+    carregador = _obter(db, carregador_id)
+    mercado_pago_caixa.criar_loja_e_caixa(db, carregador, endereco.model_dump() if endereco else None)
+    return _serializar_carregador(carregador)
+
+
+@router.post("/carregadores/{carregador_id}/simular-pagamento", dependencies=[Depends(exigir_admin)])
+def simular_pagamento_caixa(carregador_id: str, dados: PagamentoSimulado, db: Session = Depends(get_db)):
+    """Como se a maquininha do caixa tivesse aprovado este valor: passa pela
+    mesma regra de preco e liberacao, sem chamar o Mercado Pago."""
+    carregador = _obter(db, carregador_id)
+    if not mercado_pago_caixa.minutos_por_valor(carregador, dados.valor):
+        raise HTTPException(status_code=422, detail="Configure a regra de preco do carregador antes (ex.: R$ 10 = 20 min)")
+    cobranca = mercado_pago_caixa.registrar_pagamento(
+        db, carregador, dados.valor, f"sim-{uuid4().hex[:10]}", "simulado", origem="simulado"
+    )
+    db.refresh(cobranca)
+    ativa = sessoes.sessao_ativa(db, carregador_id)
+    return {
+        "minutos": cobranca.minutos,
+        "valor": cobranca.valor,
+        "estornada": bool(cobranca.estornada_em),
+        "sessao": serializar_sessao(ativa) if ativa else None,
+    }

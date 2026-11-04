@@ -168,10 +168,19 @@ def consultar_order(db, cobranca: Cobranca) -> None:
 
 
 def processar_webhook(dados: dict) -> None:
-    """Notificacao de order do MP ({"type": "order", "data": {"id": ...}}).
-    So o id e' usado; o resto vem da reconsulta."""
-    order_id = str(((dados or {}).get("data") or {}).get("id") or "")
+    """Notificacao do MP. Order ({"type": "order"}) e' venda do tablet;
+    payment ({"type": "payment"}) e' pagamento feito direto na maquininha do
+    caixa. So o id e' usado; o resto vem da reconsulta."""
+    dados = dados or {}
+    tipo = str(dados.get("type") or dados.get("topic") or "")
+    acao = str(dados.get("action") or "")
+    order_id = str((dados.get("data") or {}).get("id") or dados.get("id") or "")
     if not order_id:
+        return
+    if tipo == "payment" or acao.startswith("payment."):
+        from app.services import mercado_pago_caixa  # importa este modulo
+
+        mercado_pago_caixa.processar_pagamento(order_id)
         return
     db = SessionLocal()
     try:
@@ -209,12 +218,19 @@ def cancelar_cobranca(db, cobranca: Cobranca) -> bool:
 def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
     if cobranca is None or cobranca.estornada_em or cobranca.status != "aprovada" or cobranca.valor <= 0:
         return False
-    if _usa_mercado_pago(cobranca):
+    if _usa_mercado_pago(cobranca) or cobranca.origem == "caixa":
         carregador = db.get(Carregador, cobranca.carregador_id)
+        # Venda do tablet estorna a order; pagamento direto na maquininha do
+        # caixa estorna o payment.
+        url = (
+            f"{MP_API}/v1/orders/{cobranca.mp_order_id}/refund"
+            if _usa_mercado_pago(cobranca)
+            else f"{MP_API}/v1/payments/{cobranca.mp_payment_id}/refunds"
+        )
         try:
             mp_request(
                 "POST",
-                f"{MP_API}/v1/orders/{cobranca.mp_order_id}/refund",
+                url,
                 token_do_carregador(carregador),
                 headers={"X-Idempotency-Key": f"refund-{cobranca.external_reference}"},
             )

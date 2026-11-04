@@ -29,6 +29,17 @@ class Carregador(Base):
     mp_terminal_id = Column(String, nullable=True)
     # Token do dono; vazio usa o MP_ACCESS_TOKEN global.
     mp_access_token = Column(String, nullable=True)
+    # Loja e caixa (POS) no MP, criados pelo painel. Pagamento aprovado numa
+    # maquininha vinculada a este caixa libera tempo (mercado_pago_caixa.py).
+    mp_user_id = Column(String, nullable=True)
+    mp_store_id = Column(String, nullable=True)
+    mp_store_external_id = Column(String, nullable=True)
+    mp_pos_id = Column(String, nullable=True)
+    mp_pos_external_id = Column(String, nullable=True)
+    # Regra de preco do caixa: preco_valor reais liberam preco_minutos minutos,
+    # proporcional (ex.: 10 = 20 min -> R$ 5 da 10 min, R$ 25 da 50 min).
+    preco_valor = Column(Float, nullable=True)
+    preco_minutos = Column(Integer, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
 
     # Preenchidos pelo proprio carregador (BootNotification/StatusNotification).

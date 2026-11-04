@@ -9,15 +9,21 @@ router = APIRouter(tags=["webhooks"])
 
 @router.post("/callback-mercado-pago")
 async def callback_mercado_pago(request: Request, background: BackgroundTasks):
-    """Notificacao de order do MP. Responde 200 na hora e reconsulta a order
-    em segundo plano (o conteudo do webhook nao e' usado como verdade)."""
+    """Notificacao do MP (order do tablet ou payment da maquininha do caixa).
+    Responde 200 na hora e reconsulta em segundo plano (o conteudo do webhook
+    nao e' usado como verdade)."""
     try:
         dados = await request.json()
     except Exception:
         dados = {}
     if not dados.get("data"):
-        # Formato antigo de notificacao: ?data.id=...&type=order na query string.
-        dados = {"type": request.query_params.get("type"), "data": {"id": request.query_params.get("data.id")}}
+        # Formatos antigos na query string: ?type=order&data.id=... ou ?topic=payment&id=...
+        query = request.query_params
+        dados = {
+            **dados,
+            "type": query.get("type") or query.get("topic") or dados.get("type") or dados.get("topic"),
+            "data": {"id": query.get("data.id") or query.get("id") or dados.get("id")},
+        }
     logging.info("[MP webhook] %s", dados)
     background.add_task(pagamentos.processar_webhook, dados)
     return {"ok": True}

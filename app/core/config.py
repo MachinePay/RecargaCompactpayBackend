@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # Cobranca na Point que ninguem pagou expira depois disso.
     COBRANCA_EXPIRA_SEGUNDOS: int = int(os.getenv("COBRANCA_EXPIRA_SEGUNDOS", "180"))
 
+    # ---- Loja e caixa no MP (igual CompactPay: pagamento na maquininha
+    # vinculada ao caixa do carregador libera tempo pela regra de preco) ----
+    MP_DEFAULT_STORE_STREET_NAME: str = os.getenv("MP_DEFAULT_STORE_STREET_NAME", "Rua CompactPay")
+    MP_DEFAULT_STORE_STREET_NUMBER: str = os.getenv("MP_DEFAULT_STORE_STREET_NUMBER", "0")
+    MP_DEFAULT_STORE_CITY_NAME: str = os.getenv("MP_DEFAULT_STORE_CITY_NAME", "Sao Paulo")
+    MP_DEFAULT_STORE_STATE_NAME: str = os.getenv("MP_DEFAULT_STORE_STATE_NAME", "Sao Paulo")
+    MP_DEFAULT_STORE_LATITUDE: float = float(os.getenv("MP_DEFAULT_STORE_LATITUDE", "-23.55052"))
+    MP_DEFAULT_STORE_LONGITUDE: float = float(os.getenv("MP_DEFAULT_STORE_LONGITUDE", "-46.633308"))
+    MP_DEFAULT_POS_CATEGORY: int = int(os.getenv("MP_DEFAULT_POS_CATEGORY", "7994"))
+    MP_POS_CATEGORY_FALLBACKS: str = os.getenv("MP_POS_CATEGORY_FALLBACKS", "7994,7996,7999,5999,5399")
+
     # ---- OCPP 1.6J ----
     OCPP_HEARTBEAT_INTERVAL: int = int(os.getenv("OCPP_HEARTBEAT_INTERVAL", "60"))
     # Tempo, depois do pagamento, para o carro ser plugado e a carga comecar
