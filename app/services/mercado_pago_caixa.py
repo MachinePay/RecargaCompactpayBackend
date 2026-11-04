@@ -258,7 +258,9 @@ def carregador_do_pagamento(db, pagamento: dict) -> tuple[Carregador | None, str
     return None, "mais de um carregador com esse caixa" if candidatos else f"nenhum carregador com esse caixa/loja {ids}"
 
 
-def registrar_pagamento(db, carregador: Carregador, valor: float, payment_id: str, metodo: str | None, origem: str = "caixa") -> Cobranca | None:
+def registrar_pagamento(
+    db, carregador: Carregador, valor: float, payment_id: str, metodo: str | None, origem: str = "caixa", via: str | None = None
+) -> Cobranca | None:
     """Libera o tempo de um pagamento aprovado. Idempotente por payment_id.
     - carregador livre: abre a recarga (mesmo caminho da venda do tablet);
     - ja carregando: soma o tempo na recarga em andamento;
@@ -285,7 +287,11 @@ def registrar_pagamento(db, carregador: Carregador, valor: float, payment_id: st
         )
         db.add(cobranca)
         registrar_historico(
-            db, carregador.id_hardware, "PAGAMENTO", f"Pagamento na maquininha {payment_id}: {minutos} min ({metodo or origem})", valor=valor
+            db,
+            carregador.id_hardware,
+            "PAGAMENTO",
+            f"Pagamento na maquininha {payment_id}: {minutos} min ({metodo or origem})" + (f" - chegou {via}" if via else ""),
+            valor=valor,
         )
         db.commit()
 
@@ -346,6 +352,8 @@ def _avisar_nao_reconhecido(pagamento: dict, motivo: str) -> None:
 
 def processar_pagamento(payment_id: str, user_id=None, pagamento: dict | None = None) -> None:
     """Webhook de payment (ou o poller): reconsulta no MP e libera o carregador do caixa."""
+    # Sem o pagamento em maos e' o webhook; com ele, a conferencia automatica.
+    via = "pela conferencia automatica" if pagamento is not None else "pelo webhook"
     db = SessionLocal()
     try:
         for token in ([] if pagamento is not None else _tokens_conhecidos(db, user_id)):
@@ -375,7 +383,8 @@ def processar_pagamento(payment_id: str, user_id=None, pagamento: dict | None = 
             _avisar_nao_reconhecido(pagamento, motivo)
             return
         metodo = pagamento.get("payment_type_id") or pagamento.get("payment_method_id")
-        registrar_pagamento(db, carregador, float(pagamento.get("transaction_amount") or 0), str(payment_id), metodo)
+        logging.info("[MP caixa] payment %s liberou %s (%s)", payment_id, carregador.id_hardware, via)
+        registrar_pagamento(db, carregador, float(pagamento.get("transaction_amount") or 0), str(payment_id), metodo, via=via)
     finally:
         db.close()
 
