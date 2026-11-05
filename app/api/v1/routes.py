@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, auth, tablet, webhooks, whatsapp
+from app.api.v1.endpoints import admin, auth, motorista, tablet, webhooks, whatsapp
 
 api_router = APIRouter()
 api_router.include_router(tablet.router)
+api_router.include_router(motorista.router)
 api_router.include_router(admin.router)
 api_router.include_router(auth.router)
 api_router.include_router(whatsapp.router)

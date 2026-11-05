@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     # Cobranca na Point que ninguem pagou expira depois disso.
     COBRANCA_EXPIRA_SEGUNDOS: int = int(os.getenv("COBRANCA_EXPIRA_SEGUNDOS", "180"))
 
+    # ---- Pix do app do motorista (QR code colado no carregador) ----
+    # Pix gerado e nao pago vence depois disso.
+    PIX_EXPIRA_SEGUNDOS: int = int(os.getenv("PIX_EXPIRA_SEGUNDOS", "600"))
+    # O MP exige e-mail do pagador no Pix; o motorista nao se cadastra.
+    PIX_EMAIL_PAGADOR: str = os.getenv("PIX_EMAIL_PAGADOR", "motorista@compactrecarga.com.br")
+    # Faixa de tempo que o motorista pode escolher.
+    RECARGA_MIN_MINUTOS: int = int(os.getenv("RECARGA_MIN_MINUTOS", "10"))
+    RECARGA_MAX_MINUTOS: int = int(os.getenv("RECARGA_MAX_MINUTOS", "240"))
+
     # ---- Loja e caixa no MP (igual CompactPay: pagamento na maquininha
     # vinculada ao caixa do carregador libera tempo pela regra de preco) ----
     MP_DEFAULT_STORE_STREET_NAME: str = os.getenv("MP_DEFAULT_STORE_STREET_NAME", "Rua CompactPay")

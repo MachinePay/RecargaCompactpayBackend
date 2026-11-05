@@ -173,6 +173,12 @@ class Cobranca(Base):
     mp_payment_id = Column(String, nullable=True)
     metodo = Column(String, nullable=True)
     detalhe_status = Column(String, nullable=True)
+    # Pix do app do motorista (origem "pix"): celular que pagou (id anonimo
+    # gerado no navegador, e' por ele que sai o historico), o "copia e cola"
+    # e quando o Pix vence.
+    dispositivo_id = Column(String, index=True, nullable=True)
+    pix_copia_cola = Column(Text, nullable=True)
+    pix_expira_em = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=agora, nullable=False)
     pago_em = Column(DateTime, nullable=True)
     estornada_em = Column(DateTime, nullable=True)
