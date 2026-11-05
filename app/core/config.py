@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     # ---- Pix do app do motorista (QR code colado no carregador) ----
     # Pix gerado e nao pago vence depois disso.
-    PIX_EXPIRA_SEGUNDOS: int = int(os.getenv("PIX_EXPIRA_SEGUNDOS", "600"))
+    PIX_EXPIRA_SEGUNDOS: int = int(os.getenv("PIX_EXPIRA_SEGUNDOS", "300"))
     # O MP exige e-mail do pagador no Pix; o motorista nao se cadastra.
     PIX_EMAIL_PAGADOR: str = os.getenv("PIX_EMAIL_PAGADOR", "motorista@compactrecarga.com.br")
     # Faixa de tempo que o motorista pode escolher.
