@@ -115,6 +115,9 @@ class Carregador(Base):
     # Excluido pelo painel mas com vendas no historico: some das telas e recusa
     # a conexao, e as vendas antigas continuam nos relatorios.
     excluido_em = Column(DateTime, nullable=True)
+    # Corrente maxima (A) definida no painel; o servidor manda ao carregador
+    # (SetChargingProfile) e repete quando ele reconecta. Vazio = a do aparelho.
+    corrente_maxima_a = Column(Integer, nullable=True)
 
     # Preenchidos pelo proprio carregador (BootNotification/StatusNotification).
     vendor = Column(String, nullable=True)

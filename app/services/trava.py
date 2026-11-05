@@ -128,6 +128,33 @@ def destravar_para_venda(carregador_id: str, conector: int) -> None:
         item["tentativa"] = agora()  # nao trava de novo antes do RemoteStart sair
 
 
+def perfil_corrente(amperes: int) -> dict:
+    """SetChargingProfile do OCPP 1.6 limitando o carregador inteiro (conector 0)."""
+    return {
+        "connectorId": 0,
+        "csChargingProfiles": {
+            "chargingProfileId": 1,
+            "stackLevel": 0,
+            "chargingProfilePurpose": "ChargePointMaxProfile",
+            "chargingProfileKind": "Absolute",
+            "chargingSchedule": {
+                "startSchedule": agora().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "chargingRateUnit": "A",
+                "chargingSchedulePeriod": [{"startPeriod": 0, "limit": float(amperes)}],
+            },
+        },
+    }
+
+
+def aplicar_corrente(carregador_id: str, amperes: int):
+    """Manda o limite de corrente; devolve o Future (ou None se offline)."""
+    from app.services import ocpp_server
+
+    with _lock:
+        _item(carregador_id)["corrente"] = True
+    return ocpp_server.enviar_chamada(carregador_id, "SetChargingProfile", perfil_corrente(amperes))
+
+
 def _configurar(carregador_id: str) -> None:
     from app.services import ocpp_server
 
@@ -171,5 +198,10 @@ def verificar(db) -> None:
         )
         if configurar:
             _configurar(carregador_id)
+        with _lock:
+            reaplicar = carregador.corrente_maxima_a is not None and not _item(carregador_id).get("corrente")
+        if reaplicar:
+            # Reconectou (ou reiniciou): manda de novo o limite do painel.
+            aplicar_corrente(carregador_id, carregador.corrente_maxima_a)
         if ativa is None:
             travar(carregador_id, carregador.connector_id)

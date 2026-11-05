@@ -240,6 +240,7 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "travado": trava.travado(carregador.id_hardware) if conexao is not None else None,
         "online_desde": conexao["desde"] if conexao else None,
         "ip": conexao["ip"] if conexao else None,
+        "corrente_maxima_a": carregador.corrente_maxima_a,
         "cep": carregador.cep,
         "endereco": carregador.endereco,
         "latitude": carregador.latitude,
@@ -1001,3 +1002,29 @@ def estornar_sessao(sessao_id: int, db: Session = Depends(get_db)):
         db.refresh(cobranca)
         raise HTTPException(status_code=502, detail=cobranca.estorno_erro or "O banco recusou o estorno")
     return {"ok": True}
+
+
+
+class CorrenteDados(BaseModel):
+    amperes: int = Field(ge=0, le=32)
+
+
+@router.post("/carregadores/{carregador_id}/corrente", dependencies=[Depends(exigir_admin)])
+def definir_corrente(carregador_id: str, dados: CorrenteDados, db: Session = Depends(get_db)):
+    """Corrente maxima do carregador (0 a 32 A) por SetChargingProfile.
+    Abaixo de 6 A o carro nao carrega (minimo da norma IEC 61851)."""
+    carregador = _obter(db, carregador_id)
+    if not ocpp_server.esta_conectado(carregador_id):
+        raise HTTPException(status_code=409, detail="Carregador offline")
+    futuro = trava.aplicar_corrente(carregador_id, dados.amperes)
+    try:
+        resposta = futuro.result(timeout=OCPP_RESPOSTA_TIMEOUT_SECONDS) if futuro else {}
+    except concurrent.futures.TimeoutError:
+        raise HTTPException(status_code=504, detail="Carregador nao respondeu")
+    except ocpp_server.ErroOcpp as exc:
+        raise HTTPException(status_code=502, detail=f"Carregador respondeu erro: {exc.codigo} {exc.descricao}")
+    if (resposta or {}).get("status") == "Accepted":
+        carregador.corrente_maxima_a = dados.amperes
+        registrar_historico(db, carregador_id, "DISPOSITIVO", f"Corrente maxima definida em {dados.amperes} A")
+        db.commit()
+    return {"resposta": resposta, "corrente_maxima_a": carregador.corrente_maxima_a}

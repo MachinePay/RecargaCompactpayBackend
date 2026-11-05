@@ -561,3 +561,19 @@ def test_estornar_recarga_encerrada_pelo_painel(client):
         cp.chamar("StopTransaction", {"idTag": "", "transactionId": tx, "timestamp": "2026-11-05T00:05:00Z", "meterStop": 500, "reason": "Local"})
     assert client.post(f"/api/v1/admin/sessoes/{tx}/estornar", headers=ADMIN).json() == {"ok": True}
     assert client.post(f"/api/v1/admin/sessoes/{tx}/estornar", headers=ADMIN).status_code == 409
+
+
+def test_corrente_maxima_pelo_painel(client):
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-AMPERE", "nome_local": "x"}, headers=ADMIN)
+    assert client.post("/api/v1/admin/carregadores/CP-AMPERE/corrente", json={"amperes": 33}, headers=ADMIN).status_code == 422
+    with client.websocket_connect("/CP-AMPERE") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        pedido = _em_paralelo(lambda: client.post("/api/v1/admin/carregadores/CP-AMPERE/corrente", json={"amperes": 16}, headers=ADMIN))
+        perfil = cp.receber_chamada("SetChargingProfile")
+        assert perfil[3]["connectorId"] == 0
+        periodo = perfil[3]["csChargingProfiles"]["chargingSchedule"]["chargingSchedulePeriod"][0]
+        assert periodo == {"startPeriod": 0, "limit": 16.0}
+        cp.responder(perfil, {"status": "Accepted"})
+        pedido.join()
+    assert client.get("/api/v1/admin/carregadores/CP-AMPERE", headers=ADMIN).json()["corrente_maxima_a"] == 16
