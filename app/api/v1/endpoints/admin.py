@@ -142,6 +142,9 @@ class ClienteDados(BaseModel):
     mp_client_secret: str | None = None  # vazio na edicao = manter
     sumup_api_key: str | None = None
     ativo: bool | None = None
+    # Login do cliente no painel (cria/atualiza um Usuario role cliente).
+    acesso_email: str | None = None
+    acesso_senha: str | None = None
 
 
 class ParearSumup(BaseModel):
@@ -695,12 +698,13 @@ def _serializar_cliente(cliente: Cliente, db: Session) -> dict:
         "tem_client_secret": bool(cliente.mp_client_secret),
         "mp_user_id": cliente.mp_user_id,
         "carregadores": db.query(Carregador).filter(Carregador.cliente_id == cliente.id).count(),
+        "acessos": [u.email for u in db.query(Usuario).filter(Usuario.cliente_id == cliente.id).order_by(Usuario.id).all()],
         "created_at": cliente.created_at,
     }
 
 
 def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
-    campos = dados.model_dump(exclude_unset=True)
+    campos = dados.model_dump(exclude_unset=True, exclude={"acesso_email", "acesso_senha"})
     token = (campos.pop("mp_access_token", None) or "").strip()
     chave_sumup = (campos.pop("sumup_api_key", None) or "").strip()
     segredo = (campos.pop("mp_client_secret", None) or "").strip()
@@ -740,8 +744,29 @@ def criar_cliente(dados: ClienteDados, db: Session = Depends(get_db)):
     cliente = Cliente(nome_empresa=dados.nome_empresa.strip())
     _aplicar_dados_cliente(cliente, dados)
     db.add(cliente)
+    db.flush()
+    _criar_acesso_cliente(db, cliente, dados)
     db.commit()
     return _serializar_cliente(cliente, db)
+
+
+def _criar_acesso_cliente(db: Session, cliente: Cliente, dados: ClienteDados) -> None:
+    """Igual a CompactPay: cadastrar o cliente ja cria o login dele no painel.
+    E-mail ja existente desse cliente = troca a senha."""
+    email = (dados.acesso_email or "").strip().lower()
+    senha = dados.acesso_senha or ""
+    if not email and not senha:
+        return
+    if not email or len(senha) < 6:
+        raise HTTPException(status_code=422, detail="Login do cliente: informe e-mail e senha (minimo 6 caracteres)")
+    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+    if usuario is not None and usuario.cliente_id != cliente.id:
+        raise HTTPException(status_code=409, detail="Ja existe um usuario com esse e-mail")
+    if usuario is None:
+        usuario = Usuario(nome=cliente.nome_empresa, email=email, role="cliente", cliente_id=cliente.id)
+        db.add(usuario)
+    usuario.senha_hash = auth.hash_senha(senha)
+    usuario.ativo = True
 
 
 @router.patch("/clientes/{cliente_id}", dependencies=[Depends(exigir_admin)])
@@ -750,6 +775,7 @@ def atualizar_cliente(cliente_id: int, dados: ClienteDados, db: Session = Depend
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente nao encontrado")
     _aplicar_dados_cliente(cliente, dados)
+    _criar_acesso_cliente(db, cliente, dados)
     db.commit()
     return _serializar_cliente(cliente, db)
 

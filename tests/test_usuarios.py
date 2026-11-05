@@ -110,3 +110,20 @@ def test_excluir_carregador_apaga_ou_arquiva(client):
     # O mesmo ID pode ser cadastrado de novo, sem a configuracao antiga.
     r = client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-EX-VENDEU", **novo}, headers=ADMIN)
     assert r.status_code == 200 and r.json()["preco_valor"] is None
+
+
+def test_cadastro_do_cliente_cria_o_login(client):
+    c = client.post(
+        "/api/v1/admin/clientes",
+        json={"nome_empresa": "Dono Login", "cliente_mercado_pago": True, "acesso_email": "Dono@Login.com", "acesso_senha": "segredo1"},
+        headers=ADMIN,
+    ).json()
+    assert c["acessos"] == ["dono@login.com"]
+    assert any(u["email"] == "dono@login.com" and u["cliente_id"] == c["id"] for u in client.get("/api/v1/admin/usuarios", headers=ADMIN).json())
+    assert _entrar(client, "dono@login.com", "segredo1").status_code == 200
+    # Editar com senha nova troca a senha do mesmo login.
+    client.patch(f"/api/v1/admin/clientes/{c['id']}", json={"acesso_email": "dono@login.com", "acesso_senha": "outra123"}, headers=ADMIN)
+    assert _entrar(client, "dono@login.com", "outra123").status_code == 200
+    # Senha curta e e-mail de outro cliente sao recusados.
+    assert client.post("/api/v1/admin/clientes", json={"nome_empresa": "X", "acesso_email": "x@x.com", "acesso_senha": "123"}, headers=ADMIN).status_code == 422
+    assert client.post("/api/v1/admin/clientes", json={"nome_empresa": "Y", "acesso_email": "dono@login.com", "acesso_senha": "segredo1"}, headers=ADMIN).status_code == 409
