@@ -34,7 +34,7 @@ def _data_mp(momento) -> str:
     return momento.strftime("%Y-%m-%dT%H:%M:%S.000-00:00")
 
 
-def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id: str) -> Cobranca:
+def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id: str, motorista_id: int | None = None) -> Cobranca:
     valor = valor_por_minutos(carregador, minutos)
     if valor < 1:
         raise HTTPException(status_code=422, detail="Este carregador ainda nao tem preco cadastrado")
@@ -48,6 +48,7 @@ def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id:
         metodo="pix",
         external_reference=f"EV:{carregador.id_hardware}:pix:{uuid4().hex[:12]}",
         dispositivo_id=dispositivo_id,
+        motorista_id=motorista_id,
         pix_expira_em=expira_em,
     )
     if origem == "pix":

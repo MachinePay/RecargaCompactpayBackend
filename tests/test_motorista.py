@@ -144,3 +144,44 @@ def test_pix_de_verdade_no_mercado_pago(client, monkeypatch):
     finally:
         db.close()
     assert ("POST", "https://api.mercadopago.com/v1/payments/777/refunds", None) in chamadas
+
+
+def test_conta_do_motorista_leva_o_historico_para_outro_celular(client):
+    _carregador(client, "CP-CONTA")
+    celular_a, celular_b = "celular-conta-000a", "celular-conta-000b"
+    with client.websocket_connect("/ocpp/CP-CONTA", subprotocols=["ocpp1.6"]) as ws:
+        CarregadorFake(ws).ligar()
+        # Pagou sem conta no celular A.
+        pix_anonimo = client.post("/api/v1/publico/pix", json={"carregador_id": "CP-CONTA", "minutos": 30, "dispositivo": celular_a}).json()
+        client.post(f"/api/v1/publico/cobrancas/{pix_anonimo['id']}/simular-pagamento", params={"dispositivo": celular_a})
+
+    r = client.post("/api/v1/publico/conta", json={"nome": "Ana", "telefone": "(11) 98765-4321", "senha": "123", "dispositivo": celular_a})
+    assert r.status_code == 422
+    r = client.post("/api/v1/publico/conta", json={"nome": "Ana", "telefone": "+55 (11) 98765-4321", "senha": "segredo1", "dispositivo": celular_a})
+    assert r.status_code == 200, r.text
+    assert r.json()["motorista"]["telefone"] == "11987654321"
+    r = client.post("/api/v1/publico/conta", json={"nome": "Outra", "telefone": "11987654321", "senha": "segredo2"})
+    assert r.status_code == 409
+
+    # Entrou no celular B: ve a recarga feita sem conta no A.
+    assert client.post("/api/v1/publico/entrar", json={"telefone": "11987654321", "senha": "errada"}).status_code == 401
+    r = client.post("/api/v1/publico/entrar", json={"telefone": "11 98765-4321", "senha": "segredo1", "dispositivo": celular_b})
+    assert r.status_code == 200, r.text
+    conta = {"Authorization": f"Bearer {r.json()['token']}"}
+    assert client.get("/api/v1/publico/eu", headers=conta).json()["nome"] == "Ana"
+    historico = client.get("/api/v1/publico/historico", params={"dispositivo": celular_b}, headers=conta).json()
+    assert historico["totais"]["recargas"] == 1
+    assert client.get(f"/api/v1/publico/cobrancas/{pix_anonimo['id']}", params={"dispositivo": celular_b}, headers=conta).status_code == 200
+    # Sem o login, o celular B nao ve nada.
+    assert client.get("/api/v1/publico/historico", params={"dispositivo": celular_b}).json()["totais"]["recargas"] == 0
+
+    # O token do motorista nao abre o painel.
+    assert client.get("/api/v1/admin/carregadores", headers=conta).status_code == 401
+    assert client.get("/api/v1/publico/eu", headers={"Authorization": "Bearer lixo"}).status_code == 401
+
+
+def test_login_do_motorista_bloqueia_depois_de_muitas_tentativas(client):
+    client.post("/api/v1/publico/conta", json={"nome": "Beto", "telefone": "21999990000", "senha": "segredo1"})
+    for _ in range(5):
+        assert client.post("/api/v1/publico/entrar", json={"telefone": "21999990000", "senha": "errada"}).status_code == 401
+    assert client.post("/api/v1/publico/entrar", json={"telefone": "21999990000", "senha": "segredo1"}).status_code == 429

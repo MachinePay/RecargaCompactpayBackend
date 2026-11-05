@@ -72,6 +72,20 @@ class Usuario(Base):
     created_at = Column(DateTime, default=agora, nullable=False)
 
 
+class Motorista(Base):
+    """Conta do motorista no app (celular + senha). Opcional: da para pagar
+    sem conta; com conta o historico acompanha a pessoa em qualquer celular."""
+    __tablename__ = "motoristas"
+    id = Column(Integer, primary_key=True)
+    nome = Column(String, nullable=False)
+    # So digitos, com DDD (ex.: 11987654321).
+    telefone = Column(String, unique=True, index=True, nullable=False)
+    senha_hash = Column(String, nullable=False)
+    ativo = Column(Boolean, default=True, nullable=False)
+    ultimo_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=agora, nullable=False)
+
+
 class Carregador(Base):
     __tablename__ = "carregadores"
     # ChargePointId: ultimo pedaco da URL ws://servidor/ocpp/<id_hardware>
@@ -177,6 +191,8 @@ class Cobranca(Base):
     # gerado no navegador, e' por ele que sai o historico), o "copia e cola"
     # e quando o Pix vence.
     dispositivo_id = Column(String, index=True, nullable=True)
+    # Motorista logado quando pagou (vazio = pagou sem conta).
+    motorista_id = Column(Integer, ForeignKey("motoristas.id"), index=True, nullable=True)
     pix_copia_cola = Column(Text, nullable=True)
     pix_expira_em = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=agora, nullable=False)

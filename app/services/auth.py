@@ -58,3 +58,36 @@ def ler_token(token: str) -> dict:
         return jwt.decode(token, _segredo(), algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="Sessao expirada. Entre de novo.") from exc
+
+
+# ---- Motorista (app publico) ---------------------------------------------
+# Assinado com outra chave: o token do motorista nunca abre o painel, e o do
+# painel nunca vale no app.
+VALIDADE_MOTORISTA = timedelta(days=90)
+
+
+def _segredo_motorista() -> str:
+    return hashlib.sha256(f"motorista:{_segredo()}".encode()).hexdigest()
+
+
+def criar_token_motorista(motorista) -> str:
+    momento = agora()
+    return jwt.encode(
+        {"sub": str(motorista.id), "tipo": "motorista", "iat": momento, "exp": momento + VALIDADE_MOTORISTA},
+        _segredo_motorista(),
+        algorithm="HS256",
+    )
+
+
+def ler_token_motorista(token: str) -> int | None:
+    """Id do motorista, ou None se o token nao vale (vencido, de outro tipo)."""
+    try:
+        dados = jwt.decode(token, _segredo_motorista(), algorithms=["HS256"])
+    except jwt.PyJWTError:
+        return None
+    if dados.get("tipo") != "motorista":
+        return None
+    try:
+        return int(dados.get("sub"))
+    except (TypeError, ValueError):
+        return None
