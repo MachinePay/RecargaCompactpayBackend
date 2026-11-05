@@ -27,9 +27,9 @@ services:
       # URL do site na Vercel, ex.: https://compactpay-recarga.vercel.app
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-      # true enquanto nao tiver a Point configurada.
+      # true so na bancada: com true o Pix do motorista sai simulado (recarga de graca).
       - key: MP_SIMULADO
-        value: "true"
+        value: "false"
       - key: MP_ACCESS_TOKEN
         sync: false
 
