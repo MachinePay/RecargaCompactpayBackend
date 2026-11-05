@@ -17,8 +17,7 @@ def test_cliente_ve_so_os_proprios_carregadores_e_nao_administra(client):
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-DONO-A", "nome_local": "A", "cliente_id": a["id"]}, headers=ADMIN)
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-DONO-B", "nome_local": "B", "cliente_id": b["id"]}, headers=ADMIN)
 
-    # Usuario de cliente precisa de cliente; senha curta e' recusada.
-    assert client.post("/api/v1/admin/usuarios", json={"nome": "X", "email": "x@x.com", "senha": "123456", "role": "cliente"}, headers=ADMIN).status_code == 422
+    # Senha curta e' recusada.
     assert client.post("/api/v1/admin/usuarios", json={"nome": "X", "email": "x@x.com", "senha": "123", "role": "cliente", "cliente_id": a["id"]}, headers=ADMIN).status_code == 422
     u = client.post("/api/v1/admin/usuarios", json={"nome": "Ana", "email": "Ana@DonoA.com", "senha": "segredo1", "role": "cliente", "cliente_id": a["id"]}, headers=ADMIN)
     assert u.status_code == 200 and u.json()["email"] == "ana@donoa.com" and "senha_hash" not in u.json()
@@ -127,3 +126,13 @@ def test_cadastro_do_cliente_cria_o_login(client):
     # Senha curta e e-mail de outro cliente sao recusados.
     assert client.post("/api/v1/admin/clientes", json={"nome_empresa": "X", "acesso_email": "x@x.com", "acesso_senha": "123"}, headers=ADMIN).status_code == 422
     assert client.post("/api/v1/admin/clientes", json={"nome_empresa": "Y", "acesso_email": "dono@login.com", "acesso_senha": "segredo1"}, headers=ADMIN).status_code == 409
+
+
+def test_novo_usuario_cliente_cria_o_cliente_dono(client):
+    u = client.post("/api/v1/admin/usuarios", json={"nome": "Posto Novo", "email": "posto@novo.com", "senha": "segredo1", "role": "cliente"}, headers=ADMIN).json()
+    assert u["cliente_nome"] == "Posto Novo" and u["cliente_id"]
+    cliente = next(c for c in client.get("/api/v1/admin/clientes", headers=ADMIN).json() if c["id"] == u["cliente_id"])
+    assert cliente["acessos"] == ["posto@novo.com"] and cliente["email_contato"] == "posto@novo.com"
+    # Administrador nao ganha cliente.
+    adm = client.post("/api/v1/admin/usuarios", json={"nome": "Adm", "email": "adm@novo.com", "senha": "segredo1", "role": "admin"}, headers=ADMIN).json()
+    assert adm["cliente_id"] is None

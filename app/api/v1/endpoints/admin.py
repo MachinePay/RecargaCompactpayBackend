@@ -205,7 +205,7 @@ def _indicadores_hoje(db: Session) -> dict[str, dict]:
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup")),
+            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
         )
         .all()
     )
@@ -397,7 +397,7 @@ def resumo(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio_dia,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup")),
+            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
             Cobranca.carregador_id.in_(ids),
         )
         .all()
@@ -911,6 +911,13 @@ def criar_usuario(dados: UsuarioDados, db: Session = Depends(get_db)):
     if not (dados.nome and dados.email and dados.senha):
         raise HTTPException(status_code=422, detail="Informe nome, e-mail e senha")
     usuario = Usuario(nome=dados.nome, email="", senha_hash="", role=dados.role or "cliente")
+    if usuario.role == "cliente" and not dados.cliente_id:
+        # Igual a CompactPay: o usuario cliente E' o dono dos carregadores, entao
+        # cria o Cliente na hora (bancos e credenciais se configuram em Clientes).
+        cliente = Cliente(nome_empresa=dados.nome.strip(), email_contato=dados.email.strip().lower(), cliente_mercado_pago=True)
+        db.add(cliente)
+        db.flush()
+        dados = dados.model_copy(update={"cliente_id": cliente.id})
     _aplicar_usuario(db, usuario, dados)
     db.add(usuario)
     db.commit()
