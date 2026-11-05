@@ -982,3 +982,22 @@ def destravar_conector(carregador_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Carregador respondeu erro: {exc.codigo} {exc.descricao}")
     trava.marcar(carregador_id, False)
     return {"resposta": resposta}
+
+
+@router.post("/sessoes/{sessao_id}/estornar", dependencies=[Depends(exigir_admin)])
+def estornar_sessao(sessao_id: int, db: Session = Depends(get_db)):
+    """Devolve o pagamento de uma recarga ja encerrada (ex.: o carro nao carregou)."""
+    sessao = db.get(SessaoCarga, sessao_id)
+    if sessao is None:
+        raise HTTPException(status_code=404, detail="Recarga nao encontrada")
+    if sessao.status in STATUS_SESSAO_ATIVA:
+        raise HTTPException(status_code=409, detail="Encerre a recarga antes de estornar")
+    cobranca = db.get(Cobranca, sessao.cobranca_id)
+    if cobranca is None or cobranca.valor <= 0:
+        raise HTTPException(status_code=422, detail="Recarga sem pagamento para estornar")
+    if cobranca.estornada_em is not None:
+        raise HTTPException(status_code=409, detail="Ja foi estornada")
+    if not pagamentos.estornar_cobranca(db, cobranca):
+        db.refresh(cobranca)
+        raise HTTPException(status_code=502, detail=cobranca.estorno_erro or "O banco recusou o estorno")
+    return {"ok": True}

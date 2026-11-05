@@ -208,7 +208,8 @@ def processar_sessoes_uma_vez() -> None:
         limite_inicio = momento - timedelta(seconds=settings.TEMPO_MAXIMO_INICIO_SEGUNDOS)
 
         for sessao in db.query(SessaoCarga).filter(SessaoCarga.status == "aguardando_inicio").all():
-            if sessao.created_at <= limite_inicio:
+            # Depois de religar (pagou antes de plugar), o prazo conta de novo.
+            if (sessao.reiniciado_em or sessao.created_at) <= limite_inicio:
                 falhar_sessao(db, sessao, "carregador_nao_respondeu")
             elif (
                 sessao.start_enviado_em is None
@@ -217,7 +218,7 @@ def processar_sessoes_uma_vez() -> None:
                 enviar_remote_start(db, sessao)
 
         for sessao in db.query(SessaoCarga).filter(SessaoCarga.status == "aguardando_carro").all():
-            if sessao.created_at <= limite_inicio and sessao.minutos_pagos > 0:
+            if (sessao.reiniciado_em or sessao.created_at) <= limite_inicio and sessao.minutos_pagos > 0:
                 falhar_sessao(db, sessao, "carro_nao_conectado")
 
         # Pagou, o carregador abriu a transacao, mas o carro nunca puxou energia.

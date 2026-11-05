@@ -210,6 +210,10 @@ class SessaoCarga(Base):
     fim_real = Column(DateTime, nullable=True)
     motivo_fim = Column(String, nullable=True)
     stop_tentativas = Column(Integer, default=0, nullable=False)
+    # Pagou antes de plugar: o JST-901 encerra a transacao (sem carro) quando o
+    # carro e' plugado. A recarga volta a aguardando_inicio e liga de novo.
+    reinicios = Column(Integer, nullable=True)
+    reiniciado_em = Column(DateTime, nullable=True)
     ultimo_stop_em = Column(DateTime, nullable=True)
     meter_inicio_wh = Column(Integer, nullable=True)
     meter_atual_wh = Column(Integer, nullable=True)

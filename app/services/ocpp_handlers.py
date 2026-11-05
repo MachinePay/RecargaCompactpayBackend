@@ -120,6 +120,8 @@ def _heartbeat(db, carregador: Carregador, payload: dict) -> dict:
 
 # Ultima tentativa de parar carga sem pagamento, por carregador (nao insiste a cada mensagem).
 _ultimo_bloqueio: dict[str, datetime] = {}
+# Quantas vezes uma recarga paga liga de novo antes de desistir e estornar.
+MAX_REINICIOS = 3
 INTERVALO_BLOQUEIO = timedelta(seconds=30)
 STATUS_ENTREGANDO = ("Charging", "SuspendedEV", "SuspendedEVSE")
 
@@ -137,21 +139,31 @@ def _bloquear_carga_sem_pagamento(db, carregador: Carregador, transaction_id: in
     """Reserva da trava (services/trava.py): se mesmo assim ele carregar sem
     recarga paga aberta (StartTransaction nem chega, transactionId 0), manda
     parar e trava o conector ate a proxima venda."""
-    if _tem_recarga_aberta(db, carregador):
+    esperando = (
+        db.query(SessaoCarga.id)
+        .filter(SessaoCarga.carregador_id == carregador.id_hardware, SessaoCarga.status.in_(STATUS_SESSAO_ANTES_DE_CARREGAR))
+        .first()
+    )
+    if _tem_recarga_aberta(db, carregador) and not esperando:
         return
     momento = agora()
     anterior = _ultimo_bloqueio.get(carregador.id_hardware)
     if anterior and momento - anterior < INTERVALO_BLOQUEIO:
         return
     _ultimo_bloqueio[carregador.id_hardware] = momento
-    registrar_historico(
-        db,
-        carregador.id_hardware,
-        "SESSAO",
-        f"ALERTA: carregando sem recarga paga ({motivo})"
-        + (". Mandando parar." if settings.BLOQUEAR_CARGA_SEM_PAGAMENTO else ". Bloqueio desligado (BLOQUEAR_CARGA_SEM_PAGAMENTO=false)."),
-    )
-    if not settings.BLOQUEAR_CARGA_SEM_PAGAMENTO:
+    if esperando:
+        # Tem recarga paga esperando o RemoteStart: a carga que o carregador
+        # comecou sozinho (fora da nossa transacao) para, e a paga liga em seguida.
+        registrar_historico(db, carregador.id_hardware, "SESSAO", f"Carregador comecou sozinho ({motivo}); parando para ligar a recarga paga")
+    else:
+        registrar_historico(
+            db,
+            carregador.id_hardware,
+            "SESSAO",
+            f"ALERTA: carregando sem recarga paga ({motivo})"
+            + (". Mandando parar." if settings.BLOQUEAR_CARGA_SEM_PAGAMENTO else ". Bloqueio desligado (BLOQUEAR_CARGA_SEM_PAGAMENTO=false)."),
+        )
+    if not settings.BLOQUEAR_CARGA_SEM_PAGAMENTO and not esperando:
         return
 
     carregador_id, conector, tx = carregador.id_hardware, carregador.connector_id, transaction_id or 0
@@ -161,7 +173,8 @@ def _bloquear_carga_sem_pagamento(db, carregador: Carregador, transaction_id: in
         from app.services import ocpp_server  # ocpp_server importa este modulo
 
         ocpp_server.enviar_chamada(carregador_id, "RemoteStopTransaction", {"transactionId": tx})
-        trava.travar(carregador_id, conector, "carregou sem recarga paga")
+        if not esperando:
+            trava.travar(carregador_id, conector, "carregou sem recarga paga")
 
     threading.Timer(1.0, parar).start()
 
@@ -324,19 +337,65 @@ def _stop_transaction(db, carregador: Carregador, payload: dict) -> dict:
     if sessao.status in ("finalizada", "falhou"):
         return {}  # reenvio
     reason = payload.get("reason") or "Local"
+    meter_stop = _inteiro(payload.get("meterStop"))
+    subiu = meter_stop is not None and sessao.meter_inicio_wh is not None and meter_stop > sessao.meter_inicio_wh
+    nao_puxou = sessao.energia_desde is None and not subiu and energia_kwh(sessao) <= 0 and sessao.minutos_pagos > 0
+    desde = sessao.reiniciado_em or sessao.created_at
+    if (
+        nao_puxou
+        and sessao.status == "carregando"
+        and (sessao.reinicios or 0) < MAX_REINICIOS
+        and agora() - desde < timedelta(seconds=settings.TEMPO_PARA_PUXAR_ENERGIA_SEGUNDOS)
+    ):
+        # Pagou antes de plugar: o carregador fechou a transacao sem carro ao
+        # plugar. A recarga paga continua: o worker manda o RemoteStart de novo.
+        sessao.status = "aguardando_inicio"
+        sessao.inicio = sessao.fim_previsto = sessao.start_enviado_em = None
+        sessao.meter_inicio_wh = sessao.meter_atual_wh = None
+        sessao.reinicios = (sessao.reinicios or 0) + 1
+        sessao.reiniciado_em = agora()
+        registrar_historico(
+            db, carregador.id_hardware, "SESSAO", f"Sessao {sessao.id}: o carregador encerrou antes do carro carregar ({reason}); ligando de novo"
+        )
+        return {}
     sessao.status = "finalizada"
     sessao.fim_real = agora()
     sessao.meter_fim_wh = _inteiro(payload.get("meterStop"))
     if sessao.meter_fim_wh is not None:
         sessao.meter_atual_wh = sessao.meter_fim_wh
     sessao.motivo_fim = sessao.motivo_fim or MOTIVOS_PARADA.get(reason, reason)
+    if nao_puxou:
+        # Pagou e o carro nunca puxou energia: devolve o dinheiro.
+        sessao.motivo_fim = "carro_nao_puxou_energia"
+        _estornar_depois(sessao.id)
     registrar_historico(
         db,
         carregador.id_hardware,
         "SESSAO",
-        f"Sessao {sessao.id} encerrada ({sessao.motivo_fim}), energia {energia_kwh(sessao):.2f} kWh",
+        f"Sessao {sessao.id} encerrada ({sessao.motivo_fim}), energia {energia_kwh(sessao):.2f} kWh"
+        + (" - sem energia, estornando" if nao_puxou else ""),
     )
     return {}
+
+
+def _estornar_depois(sessao_id: int) -> None:
+    """Estorno fora do tratamento da mensagem (depois do commit; chama o banco
+    do pagamento). Idempotente: estornar_cobranca ignora o ja estornado."""
+
+    def estornar():
+        from app.services import pagamentos  # pagamentos importa este modulo
+
+        if not settings.AUTO_ESTORNO:
+            return
+        db = SessionLocal()
+        try:
+            sessao = db.get(SessaoCarga, sessao_id)
+            if sessao is not None:
+                pagamentos.estornar_cobranca(db, db.get(Cobranca, sessao.cobranca_id))
+        finally:
+            db.close()
+
+    threading.Timer(0.5, estornar).start()
 
 
 def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
@@ -365,6 +424,8 @@ def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
             if amostra.get("unit") == "kWh":
                 valor *= 1000
             sessao.meter_atual_wh = int(valor)
+    if sessao.meter_inicio_wh is not None and sessao.meter_atual_wh is not None and sessao.meter_atual_wh > sessao.meter_inicio_wh:
+        _carro_puxou_energia(db, sessao, "medidor subindo")
     return {}
 
 

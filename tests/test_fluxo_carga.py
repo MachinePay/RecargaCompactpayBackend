@@ -434,6 +434,7 @@ def test_conector_fica_travado_sem_recarga_paga(client, monkeypatch):
         cp.responder(start, {"status": "Accepted"})
         venda.join()
         tx = cp.chamar("StartTransaction", {"idTag": start[3]["idTag"], "connectorId": 1, "timestamp": "2026-11-04T00:00:00Z", "meterStart": 0})["transactionId"]
+        cp.chamar("StatusNotification", {"connectorId": 1, "errorCode": "NoError", "status": "Charging"})
         cp.chamar("StopTransaction", {"idTag": "", "transactionId": tx, "timestamp": "2026-11-04T00:10:00Z", "meterStop": 100, "reason": "EVDisconnected"})
 
         # Recarga terminou: trava de novo (depois do intervalo entre tentativas).
@@ -496,3 +497,67 @@ def test_tempo_so_conta_quando_o_carro_puxa_energia(client, monkeypatch):
         assert db.get(Cobranca, sessao.cobranca_id).estornada_em is not None
     finally:
         db.close()
+
+
+def test_pagou_antes_de_plugar_liga_de_novo_e_sem_energia_estorna(client):
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-ANTES", "nome_local": "x"}, headers=ADMIN)
+    client.patch("/api/v1/admin/carregadores/CP-ANTES", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
+    with client.websocket_connect("/CP-ANTES") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        client.post("/api/v1/admin/carregadores/CP-ANTES/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        tag = start[3]["idTag"]
+        sessao_id = cp.chamar("StartTransaction", {"idTag": tag, "connectorId": 1, "timestamp": "2026-11-05T00:00:00Z", "meterStart": 0})["transactionId"]
+
+        # Plugou o carro: o JST-901 fecha a transacao que abriu sem carro.
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": sessao_id, "timestamp": "2026-11-05T00:01:00Z", "meterStop": 0, "reason": "EVDisconnected"})
+        assert _sessao(sessao_id).status == "aguardando_inicio"
+
+        # O worker liga de novo, agora com o carro: carrega e o tempo conta.
+        sessoes.processar_sessoes_uma_vez()
+        start = cp.receber_chamada("RemoteStartTransaction")
+        assert start[3]["idTag"] == tag
+        cp.responder(start, {"status": "Accepted"})
+        assert cp.chamar("StartTransaction", {"idTag": tag, "connectorId": 1, "timestamp": "2026-11-05T00:01:10Z", "meterStart": 0})["transactionId"] == sessao_id
+        cp.chamar("StatusNotification", {"connectorId": 1, "errorCode": "NoError", "status": "Charging"})
+        assert _sessao(sessao_id).energia_desde is not None
+
+        # Outra venda em que o carro nunca puxa energia e as tentativas acabam: estorna.
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": sessao_id, "timestamp": "2026-11-05T00:20:00Z", "meterStop": 3000, "reason": "Local"})
+        client.post("/api/v1/admin/carregadores/CP-ANTES/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        outra = cp.chamar("StartTransaction", {"idTag": start[3]["idTag"], "connectorId": 1, "timestamp": "2026-11-05T01:00:00Z", "meterStart": 0})["transactionId"]
+        _alterar_sessao(outra, reinicios=3)
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": outra, "timestamp": "2026-11-05T01:01:00Z", "meterStop": 0, "reason": "EVDisconnected"})
+
+    assert _sessao(sessao_id).status == "finalizada" and _sessao(sessao_id).motivo_fim != "carro_nao_puxou_energia"
+    assert _sessao(outra).motivo_fim == "carro_nao_puxou_energia"
+
+    def estornada():
+        db = SessionLocal()
+        try:
+            return db.get(Cobranca, _sessao(outra).cobranca_id).estornada_em is not None
+        finally:
+            db.close()
+
+    _esperar(estornada)
+
+
+def test_estornar_recarga_encerrada_pelo_painel(client):
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-ESTORNO", "nome_local": "x"}, headers=ADMIN)
+    client.patch("/api/v1/admin/carregadores/CP-ESTORNO", json={"preco_valor": 10, "preco_minutos": 20}, headers=ADMIN)
+    with client.websocket_connect("/CP-ESTORNO") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        client.post("/api/v1/admin/carregadores/CP-ESTORNO/simular-pagamento", json={"valor": 10}, headers=ADMIN)
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        tx = cp.chamar("StartTransaction", {"idTag": start[3]["idTag"], "connectorId": 1, "timestamp": "2026-11-05T00:00:00Z", "meterStart": 0})["transactionId"]
+        assert client.post(f"/api/v1/admin/sessoes/{tx}/estornar", headers=ADMIN).status_code == 409  # ainda ativa
+        cp.chamar("StatusNotification", {"connectorId": 1, "errorCode": "NoError", "status": "Charging"})
+        cp.chamar("StopTransaction", {"idTag": "", "transactionId": tx, "timestamp": "2026-11-05T00:05:00Z", "meterStop": 500, "reason": "Local"})
+    assert client.post(f"/api/v1/admin/sessoes/{tx}/estornar", headers=ADMIN).json() == {"ok": True}
+    assert client.post(f"/api/v1/admin/sessoes/{tx}/estornar", headers=ADMIN).status_code == 409
