@@ -13,7 +13,7 @@ from app.services.ocpp_handlers import energia_kwh
 
 FUSO = timedelta(hours=3)
 PERIODOS = ("hoje", "7d", "30d", "mes", "mes_anterior", "personalizado")
-ORIGENS_VENDA = ("caixa", "point", "sumup", "pix")
+ORIGENS_VENDA = ("caixa", "point", "sumup")
 
 
 def _hoje_br() -> date:

@@ -169,11 +169,6 @@ def aprovar_cobranca(db, cobranca_id: int, payment_id: str | None = None, metodo
 
 def consultar_order(db, cobranca: Cobranca) -> None:
     """Reconsulta a order no MP e aplica o resultado na cobranca."""
-    if cobranca.origem == "pix":
-        from app.services import pix  # pix importa este modulo
-
-        pix.consultar(db, cobranca)
-        return
     if not _usa_mercado_pago(cobranca) or not cobranca.mp_order_id:
         return
     carregador = db.get(Carregador, cobranca.carregador_id)
@@ -216,18 +211,13 @@ def processar_webhook(dados: dict) -> None:
     order_id = str((dados.get("data") or {}).get("id") or dados.get("id") or "")
     if not order_id:
         return
+    if tipo == "payment" or acao.startswith("payment."):
+        from app.services import mercado_pago_caixa  # importa este modulo
+
+        mercado_pago_caixa.processar_pagamento(order_id, dados.get("user_id"))
+        return
     db = SessionLocal()
     try:
-        if tipo == "payment" or acao.startswith("payment."):
-            # Pix do app do motorista: a cobranca ja tem o payment_id.
-            pix = db.query(Cobranca).filter(Cobranca.mp_payment_id == order_id, Cobranca.origem == "pix").first()
-            if pix is not None:
-                consultar_order(db, pix)
-                return
-            from app.services import mercado_pago_caixa  # importa este modulo
-
-            mercado_pago_caixa.processar_pagamento(order_id, dados.get("user_id"))
-            return
         cobranca = db.query(Cobranca).filter(Cobranca.mp_order_id == order_id).first()
         if cobranca is None:
             logging.info("[MP webhook] order %s nao e' de carregador, ignorada", order_id)
@@ -243,11 +233,6 @@ def cancelar_cobranca(db, cobranca: Cobranca) -> bool:
     aguardando (o poller descobre se foi paga)."""
     if cobranca.status != "aguardando_pagamento":
         return False
-    if cobranca.origem == "pix":
-        from app.services import pix
-
-        if not pix.cancelar(db, cobranca):
-            return False
     if _usa_mercado_pago(cobranca) and cobranca.mp_order_id:
         carregador = db.get(Carregador, cobranca.carregador_id)
         try:
@@ -285,10 +270,10 @@ def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
             )
             db.commit()
             return False
-    elif _usa_mercado_pago(cobranca) or cobranca.origem in ("caixa", "pix"):
+    elif _usa_mercado_pago(cobranca) or cobranca.origem == "caixa":
         carregador = db.get(Carregador, cobranca.carregador_id)
         # Venda do tablet estorna a order; pagamento direto na maquininha do
-        # caixa e Pix do app do motorista estornam o payment.
+        # caixa estorna o payment.
         url = (
             f"{MP_API}/v1/orders/{cobranca.mp_order_id}/refund"
             if _usa_mercado_pago(cobranca)
@@ -328,9 +313,7 @@ def processar_cobrancas_pendentes_uma_vez() -> None:
             try:
                 consultar_order(db, cobranca)
                 db.refresh(cobranca)
-                # Pix tem prazo proprio (pix_expira_em); a Point usa COBRANCA_EXPIRA_SEGUNDOS.
-                vencida = agora() >= cobranca.pix_expira_em if cobranca.pix_expira_em else cobranca.created_at <= limite
-                if cobranca.status == "aguardando_pagamento" and vencida:
+                if cobranca.status == "aguardando_pagamento" and cobranca.created_at <= limite:
                     if cancelar_cobranca(db, cobranca):
                         cobranca.status = "expirada"
                         db.commit()
