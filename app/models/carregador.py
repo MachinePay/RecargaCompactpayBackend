@@ -7,7 +7,7 @@ para historico_operacoes.
 """
 import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -217,6 +217,11 @@ class SessaoCarga(Base):
     o servidor, na resposta do StartTransaction.
     """
     __tablename__ = "sessoes_carga"
+    # Listas paginadas (mais nova primeiro), por carregador e por periodo.
+    __table_args__ = (
+        Index("ix_sessoes_carregador_id_desc", "carregador_id", "id"),
+        Index("ix_sessoes_created_at", "created_at"),
+    )
     id = Column(Integer, primary_key=True)
     carregador_id = Column(String, ForeignKey("carregadores.id_hardware"), index=True, nullable=False)
     cobranca_id = Column(Integer, ForeignKey("cobrancas.id"), unique=True, nullable=False)
@@ -249,6 +254,7 @@ class HistoricoOperacao(Base):
     """Log operacional por carregador, mesmas categorias da CompactPay:
     PAGAMENTO, DISPOSITIVO, SESSAO, TESTE."""
     __tablename__ = "historico_operacoes"
+    __table_args__ = (Index("ix_historico_carregador_id_desc", "carregador_id", "id"),)
     id = Column(Integer, primary_key=True)
     carregador_id = Column(String, index=True, nullable=False)
     categoria = Column(String, nullable=False)

@@ -4,11 +4,12 @@ Fica assim ate o painel ser integrado ao frontend da CompactPay."""
 import concurrent.futures
 import hmac
 import socket
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -441,20 +442,41 @@ def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Sessio
     return resposta
 
 
+# Listas que crescem sem parar (recargas, historico) sao sempre paginadas.
+POR_PAGINA_MAX = 100
+
+
+def _paginar(query, pagina: int, por_pagina: int, ordem) -> dict:
+    por_pagina = max(1, min(por_pagina, POR_PAGINA_MAX))
+    pagina = max(1, pagina)
+    total = query.order_by(None).count()
+    itens = query.order_by(ordem).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+    return {"itens": itens, "total": total, "pagina": pagina, "por_pagina": por_pagina, "paginas": max(1, -(-total // por_pagina))}
+
+
+def _periodo_utc(de: date | None, ate: date | None) -> tuple[datetime | None, datetime | None]:
+    """Dias de Brasilia (fim incluso) -> limites em UTC."""
+    return (relatorios._utc(de) if de else None, relatorios._utc(ate + timedelta(days=1)) if ate else None)
+
+
 @router.get("/carregadores/{carregador_id}/historico")
-def historico_carregador(carregador_id: str, limite: int = 100, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+def historico_carregador(
+    carregador_id: str,
+    categoria: str | None = None,
+    pagina: int = 1,
+    por_pagina: int = 50,
+    db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
+):
     _checar_acesso(db, acesso, carregador_id)
-    itens = (
-        db.query(HistoricoOperacao)
-        .filter(HistoricoOperacao.carregador_id == carregador_id)
-        .order_by(HistoricoOperacao.id.desc())
-        .limit(min(limite, 500))
-        .all()
-    )
-    return [
-        {"categoria": h.categoria, "descricao": h.descricao, "valor": h.valor, "created_at": h.created_at}
-        for h in itens
+    query = db.query(HistoricoOperacao).filter(HistoricoOperacao.carregador_id == carregador_id)
+    if categoria:
+        query = query.filter(HistoricoOperacao.categoria == categoria)
+    resultado = _paginar(query, pagina, por_pagina, HistoricoOperacao.id.desc())
+    resultado["itens"] = [
+        {"categoria": h.categoria, "descricao": h.descricao, "valor": h.valor, "created_at": h.created_at} for h in resultado["itens"]
     ]
+    return resultado
 
 
 @router.post("/carregadores/{carregador_id}/pacotes", dependencies=[Depends(exigir_admin)])
@@ -510,14 +532,70 @@ def revogar_terminal(terminal_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.get("/sessoes")
-def listar_sessoes(carregador_id: str | None = None, limite: int = 50, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+def _sessoes_visiveis(db: Session, acesso: Acesso):
     query = db.query(SessaoCarga)
     if not acesso.admin:
-        query = query.filter(SessaoCarga.carregador_id.in_([c.id_hardware for c in _carregadores_visiveis(db, acesso).all()]))
+        # Subconsulta: nao traz a lista de carregadores do cliente para a memoria.
+        meus = select(Carregador.id_hardware).where(Carregador.cliente_id == acesso.cliente_id)
+        query = query.filter(SessaoCarga.carregador_id.in_(meus))
+    return query
+
+
+# Filtro de status das telas de recargas.
+GRUPOS_STATUS = {
+    "ativas": ("aguardando_inicio", "aguardando_carro", "carregando", "encerrando"),
+    "finalizada": ("finalizada",),
+    "falhou": ("falhou",),
+}
+
+
+@router.get("/recargas")
+def listar_recargas(
+    carregador_id: str | None = None,
+    status: str | None = None,
+    origem: str | None = None,
+    de: date | None = None,
+    ate: date | None = None,
+    estornadas: bool = False,
+    pagina: int = 1,
+    por_pagina: int = 25,
+    db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
+):
+    """Recargas paginadas (mais nova primeiro) com filtros. Periodo em dias de Brasilia."""
+    query = _sessoes_visiveis(db, acesso)
     if carregador_id:
         query = query.filter(SessaoCarga.carregador_id == carregador_id)
-    lista = query.order_by(SessaoCarga.id.desc()).limit(min(limite, 500)).all()
+    if status:
+        if status not in GRUPOS_STATUS:
+            raise HTTPException(status_code=422, detail="Status invalido")
+        query = query.filter(SessaoCarga.status.in_(GRUPOS_STATUS[status]))
+    inicio, fim = _periodo_utc(de, ate)
+    if inicio:
+        query = query.filter(SessaoCarga.created_at >= inicio)
+    if fim:
+        query = query.filter(SessaoCarga.created_at < fim)
+    if origem or estornadas:
+        query = query.join(Cobranca, Cobranca.id == SessaoCarga.cobranca_id)
+        if origem:
+            query = query.filter(Cobranca.origem == origem)
+        if estornadas:
+            query = query.filter(Cobranca.estornada_em.isnot(None))
+    resultado = _paginar(query, pagina, por_pagina, SessaoCarga.id.desc())
+    resultado["itens"] = _serializar_sessoes(db, resultado["itens"])
+    return resultado
+
+
+@router.get("/sessoes")
+def listar_sessoes(carregador_id: str | None = None, limite: int = 50, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    """Ultimas N (telas ao vivo). Para consultar o passado: /recargas."""
+    query = _sessoes_visiveis(db, acesso)
+    if carregador_id:
+        query = query.filter(SessaoCarga.carregador_id == carregador_id)
+    return _serializar_sessoes(db, query.order_by(SessaoCarga.id.desc()).limit(min(limite, POR_PAGINA_MAX)).all())
+
+
+def _serializar_sessoes(db: Session, lista: list[SessaoCarga]) -> list[dict]:
     cobrancas = {c.id: c for c in db.query(Cobranca).filter(Cobranca.id.in_([s.cobranca_id for s in lista])).all()}
     resposta = []
     for sessao in lista:

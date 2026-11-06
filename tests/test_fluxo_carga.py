@@ -457,7 +457,7 @@ def test_carga_sem_recarga_paga_e_bloqueada(client, monkeypatch):
         indisponivel = cp.receber_chamada("ChangeAvailability")
         assert indisponivel[3]["type"] == "Inoperative"
         cp.responder(indisponivel, {"status": "Accepted"})
-    historico = client.get("/api/v1/admin/carregadores/CP-PLUG/historico", headers=ADMIN).json()
+    historico = client.get("/api/v1/admin/carregadores/CP-PLUG/historico", headers=ADMIN).json()["itens"]
     assert any("ALERTA: carregando sem recarga paga" in h["descricao"] for h in historico)
 
 
