@@ -118,7 +118,7 @@ def test_cadastro_do_cliente_cria_o_login(client):
         headers=ADMIN,
     ).json()
     assert c["acessos"] == ["dono@login.com"]
-    assert any(u["email"] == "dono@login.com" and u["cliente_id"] == c["id"] for u in client.get("/api/v1/admin/usuarios", headers=ADMIN).json())
+    assert any(u["email"] == "dono@login.com" and u["cliente_id"] == c["id"] for u in client.get("/api/v1/admin/usuarios", params={"busca": "dono@login"}, headers=ADMIN).json()["itens"])
     assert _entrar(client, "dono@login.com", "segredo1").status_code == 200
     # Editar com senha nova troca a senha do mesmo login.
     client.patch(f"/api/v1/admin/clientes/{c['id']}", json={"acesso_email": "dono@login.com", "acesso_senha": "outra123"}, headers=ADMIN)

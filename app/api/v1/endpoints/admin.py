@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, case, exists, func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -190,8 +190,12 @@ def _inicio_do_dia():
     return (agora() - timedelta(hours=3)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=3)
 
 
-def _indicadores_hoje(db: Session) -> dict[str, dict]:
-    """Vendas, energia e quedas de hoje por carregador (uma consulta por tipo)."""
+QUEDA = "Carregador desconectou do servidor OCPP"
+
+
+def _indicadores_hoje(db: Session, ids: list[str] | None = None) -> dict[str, dict]:
+    """Vendas, energia e quedas de hoje por carregador (uma consulta por tipo).
+    ids: so esses carregadores (a pagina aberta da lista)."""
     inicio = _inicio_do_dia()
     por_carregador: dict[str, dict] = {}
 
@@ -207,6 +211,7 @@ def _indicadores_hoje(db: Session) -> dict[str, dict]:
             Cobranca.pago_em >= inicio,
             Cobranca.estornada_em.is_(None),
             Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
+            *([Cobranca.carregador_id.in_(ids)] if ids is not None else []),
         )
         .all()
     )
@@ -214,13 +219,20 @@ def _indicadores_hoje(db: Session) -> dict[str, dict]:
         dados = item(venda.carregador_id)
         dados["faturamento_hoje"] = round(dados["faturamento_hoje"] + venda.valor, 2)
         dados["vendas_hoje"] += 1
-    for sessao in db.query(SessaoCarga).filter(SessaoCarga.inicio >= inicio).all():
+    sessoes_hoje = db.query(SessaoCarga).filter(SessaoCarga.inicio >= inicio)
+    if ids is not None:
+        sessoes_hoje = sessoes_hoje.filter(SessaoCarga.carregador_id.in_(ids))
+    for sessao in sessoes_hoje.all():
         dados = item(sessao.carregador_id)
         dados["recargas_hoje"] += 1
         dados["energia_hoje_kwh"] = round(dados["energia_hoje_kwh"] + energia_kwh(sessao), 3)
     quedas = (
         db.query(HistoricoOperacao)
-        .filter(HistoricoOperacao.created_at >= inicio, HistoricoOperacao.descricao == "Carregador desconectou do servidor OCPP")
+        .filter(
+            HistoricoOperacao.created_at >= inicio,
+            HistoricoOperacao.descricao == QUEDA,
+            *([HistoricoOperacao.carregador_id.in_(ids)] if ids is not None else []),
+        )
         .all()
     )
     for queda in quedas:
@@ -351,17 +363,159 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
     return resposta
 
 
-@router.get("/carregadores")
-def listar_carregadores(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+def _busca(query, termo: str | None, *colunas):
+    """Cada palavra precisa aparecer em alguma das colunas (sem diferenciar maiuscula)."""
+    for palavra in (termo or "").split()[:5]:
+        padrao = f"%{palavra.replace('%', '').replace('_', '')}%"
+        query = query.filter(or_(*(coluna.ilike(padrao) for coluna in colunas)))
+    return query
+
+
+def _completar_carregadores(db: Session, lista: list[Carregador]) -> list[dict]:
+    """Serializa com os numeros de hoje e a recarga ativa (consultas em lote)."""
+    ids = [c.id_hardware for c in lista]
+    hoje = _indicadores_hoje(db, ids)
+    ativas: dict[str, SessaoCarga] = {}
+    if ids:
+        for sessao in (
+            db.query(SessaoCarga)
+            .filter(SessaoCarga.carregador_id.in_(ids), SessaoCarga.status.in_(STATUS_SESSAO_ATIVA))
+            .order_by(SessaoCarga.id)
+            .all()
+        ):
+            ativas[sessao.carregador_id] = sessao  # fica a mais nova
     resposta = []
-    hoje = _indicadores_hoje(db)
-    for carregador in _carregadores_visiveis(db, acesso).order_by(Carregador.id_hardware).all():
+    for carregador in lista:
         item = _serializar_carregador(carregador)
         item.update(hoje.get(carregador.id_hardware) or _indicadores_vazios())
-        ativa = sessoes.sessao_ativa(db, carregador.id_hardware)
+        ativa = ativas.get(carregador.id_hardware)
         item["sessao_ativa"] = serializar_sessao(ativa) if ativa else None
         resposta.append(item)
     return resposta
+
+
+def _condicoes_status() -> dict:
+    """Status ao vivo como condicao SQL: online vem da memoria (conexoes abertas)."""
+    online = Carregador.id_hardware.in_(ocpp_server.conectados())
+    defeito = or_(and_(Carregador.erro_conector.isnot(None), Carregador.erro_conector != ""), Carregador.status_conector == "Faulted")
+    carregando = exists().where(SessaoCarga.carregador_id == Carregador.id_hardware, SessaoCarga.status.in_(STATUS_SESSAO_ATIVA))
+    return {
+        "offline": not_(online),
+        "defeito": and_(online, defeito),
+        "carregando": and_(online, not_(defeito), carregando),
+        "online": and_(online, not_(defeito), not_(carregando)),
+    }
+
+
+def _ordem_carregadores(coluna: str | None, direcao: str, condicoes: dict):
+    inicio = _inicio_do_dia()
+    if coluna == "carregador":
+        valor = func.lower(Carregador.nome_local)
+    elif coluna == "cliente":
+        valor = select(func.lower(Cliente.nome_empresa)).where(Cliente.id == Carregador.cliente_id).scalar_subquery()
+    elif coluna == "hoje":
+        valor = (
+            select(func.coalesce(func.sum(Cobranca.valor), 0))
+            .where(
+                Cobranca.carregador_id == Carregador.id_hardware,
+                Cobranca.status == "aprovada",
+                Cobranca.pago_em >= inicio,
+                Cobranca.estornada_em.is_(None),
+            )
+            .scalar_subquery()
+        )
+    elif coluna == "conexao":
+        # Menos quedas = melhor; offline por ultimo.
+        quedas = (
+            select(func.count(HistoricoOperacao.id))
+            .where(HistoricoOperacao.carregador_id == Carregador.id_hardware, HistoricoOperacao.created_at >= inicio, HistoricoOperacao.descricao == QUEDA)
+            .scalar_subquery()
+        )
+        valor = case((condicoes["offline"], -1), else_=1000 - quedas)
+    else:  # status: problema primeiro (igual a CompactPay)
+        valor = case((condicoes["offline"], 0), (condicoes["defeito"], 1), (condicoes["carregando"], 2), else_=3)
+    return [valor.desc() if direcao == "desc" else valor.asc(), Carregador.nome_local.asc()]
+
+
+@router.get("/carregadores")
+def listar_carregadores(
+    pagina: int | None = None,
+    por_pagina: int = 25,
+    busca: str | None = None,
+    cliente_id: int | None = None,
+    status: str | None = None,
+    ordem: str | None = None,
+    direcao: str = "asc",
+    db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
+):
+    """Com pagina: lista paginada com busca, filtro e ordem no servidor, mais a
+    contagem por status e o resumo do dia. Sem pagina: todos (mapa e painel ao
+    vivo; para os selects use /carregadores/opcoes)."""
+    if pagina is None:
+        return _completar_carregadores(db, _carregadores_visiveis(db, acesso).order_by(Carregador.id_hardware).all())
+    condicoes = _condicoes_status()
+    visiveis = _carregadores_visiveis(db, acesso)
+    query = visiveis
+    if cliente_id:
+        query = query.filter(Carregador.cliente_id == cliente_id)
+    query = _busca(
+        query.outerjoin(Cliente, Cliente.id == Carregador.cliente_id),
+        busca,
+        Carregador.id_hardware,
+        Carregador.nome_local,
+        Carregador.endereco,
+        Carregador.modelo,
+        Carregador.vendor,
+        Carregador.firmware_version,
+        Cliente.nome_empresa,
+    )
+    contagem = {chave: query.filter(condicao).count() for chave, condicao in condicoes.items()}
+    if status:
+        if status not in condicoes:
+            raise HTTPException(status_code=422, detail="Status invalido")
+        query = query.filter(condicoes[status])
+    resultado = _paginar(query, pagina, por_pagina, None)
+    resultado["itens"] = query.order_by(*_ordem_carregadores(ordem, direcao, condicoes)).offset(
+        (resultado["pagina"] - 1) * resultado["por_pagina"]
+    ).limit(resultado["por_pagina"]).all()
+    resultado["itens"] = _completar_carregadores(db, resultado["itens"])
+    resultado["contagem"] = {"todos": sum(contagem.values()), **contagem}
+    # Cartoes do topo: todos os carregadores visiveis, sem a busca.
+    ids_visiveis = select(Carregador.id_hardware).where(
+        Carregador.excluido_em.is_(None), *([] if acesso.admin else [Carregador.cliente_id == acesso.cliente_id])
+    )
+    vendas = (
+        db.query(func.coalesce(func.sum(Cobranca.valor), 0), func.count(Cobranca.id))
+        .filter(
+            Cobranca.carregador_id.in_(ids_visiveis),
+            Cobranca.status == "aprovada",
+            Cobranca.pago_em >= _inicio_do_dia(),
+            Cobranca.estornada_em.is_(None),
+            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
+        )
+        .one()
+    )
+    resultado["resumo"] = {
+        "cadastrados": visiveis.count(),
+        "online": visiveis.filter(Carregador.id_hardware.in_(ocpp_server.conectados())).count(),
+        "carregando": visiveis.filter(condicoes["carregando"]).count(),
+        "faturamento_hoje": round(float(vendas[0] or 0), 2),
+        "vendas_hoje": vendas[1],
+    }
+    return resultado
+
+
+@router.get("/carregadores/opcoes")
+def opcoes_carregadores(cliente_id: int | None = None, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    """So id e nome, para os selects (filtros e formularios)."""
+    query = _carregadores_visiveis(db, acesso)
+    if cliente_id:
+        query = query.filter(Carregador.cliente_id == cliente_id)
+    return [
+        {"id_hardware": c.id_hardware, "nome_local": c.nome_local, "cliente_id": c.cliente_id, "cliente_nome": c.cliente.nome_empresa if c.cliente else None}
+        for c in query.order_by(Carregador.nome_local).all()
+    ]
 
 
 @router.get("/carregadores/{carregador_id}")
@@ -450,7 +604,7 @@ def _paginar(query, pagina: int, por_pagina: int, ordem) -> dict:
     por_pagina = max(1, min(por_pagina, POR_PAGINA_MAX))
     pagina = max(1, pagina)
     total = query.order_by(None).count()
-    itens = query.order_by(ordem).offset((pagina - 1) * por_pagina).limit(por_pagina).all()
+    itens = query.order_by(ordem).offset((pagina - 1) * por_pagina).limit(por_pagina).all() if ordem is not None else []
     return {"itens": itens, "total": total, "pagina": pagina, "por_pagina": por_pagina, "paginas": max(1, -(-total // por_pagina))}
 
 
@@ -808,11 +962,44 @@ def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
 
 
 @router.get("/clientes")
-def listar_clientes(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+def listar_clientes(
+    pagina: int | None = None,
+    por_pagina: int = 25,
+    busca: str | None = None,
+    db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
+):
+    """Com pagina: paginada com busca. Sem pagina: todos (selects: /clientes/opcoes)."""
     query = db.query(Cliente)
     if not acesso.admin:
         query = query.filter(Cliente.id == acesso.cliente_id)
-    return [_serializar_cliente(c, db) for c in query.order_by(Cliente.nome_empresa).all()]
+    if pagina is None:
+        return [_serializar_cliente(c, db) for c in query.order_by(Cliente.nome_empresa).all()]
+    query = _busca(query, busca, Cliente.nome_empresa, Cliente.email_contato, Cliente.telefone, Cliente.documento)
+    resultado = _paginar(query, pagina, por_pagina, Cliente.nome_empresa.asc())
+    resultado["itens"] = [_serializar_cliente(c, db) for c in resultado["itens"]]
+    return resultado
+
+
+@router.get("/clientes/opcoes")
+def opcoes_clientes(sem_login: bool = False, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    """Leve, para os selects: nome, bancos e se tem credencial."""
+    query = db.query(Cliente)
+    if not acesso.admin:
+        query = query.filter(Cliente.id == acesso.cliente_id)
+    if sem_login:
+        query = query.filter(~exists().where(Usuario.cliente_id == Cliente.id))
+    return [
+        {
+            "id": c.id,
+            "nome_empresa": c.nome_empresa,
+            "email_contato": c.email_contato,
+            "bancos": _bancos_do_cliente(c),
+            "tem_token_mp": bool(c.mp_access_token),
+            "tem_sumup": bool(c.sumup_api_key and c.sumup_merchant_code),
+        }
+        for c in query.order_by(Cliente.nome_empresa).limit(500 if not sem_login else 20).all()
+    ]
 
 
 @router.post("/clientes", dependencies=[Depends(exigir_admin)])
@@ -980,8 +1167,19 @@ def _aplicar_usuario(db: Session, usuario: Usuario, dados: UsuarioDados) -> None
 
 
 @router.get("/usuarios", dependencies=[Depends(exigir_admin)])
-def listar_usuarios(db: Session = Depends(get_db)):
-    return [_serializar_usuario(u) for u in db.query(Usuario).order_by(Usuario.nome).all()]
+def listar_usuarios(
+    pagina: int = 1,
+    por_pagina: int = 25,
+    busca: str | None = None,
+    role: str | None = None,
+    db: Session = Depends(get_db),
+):
+    query = _busca(db.query(Usuario), busca, Usuario.nome, Usuario.email)
+    if role:
+        query = query.filter(Usuario.role == role)
+    resultado = _paginar(query, pagina, por_pagina, Usuario.nome.asc())
+    resultado["itens"] = [_serializar_usuario(u) for u in resultado["itens"]]
+    return resultado
 
 
 @router.post("/usuarios", dependencies=[Depends(exigir_admin)])

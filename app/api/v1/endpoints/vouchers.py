@@ -19,9 +19,10 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import not_, or_
 from sqlalchemy.orm import Session
 
-from app.api.v1.endpoints.admin import Acesso, _checar_acesso, acesso_atual
+from app.api.v1.endpoints.admin import Acesso, _busca, _checar_acesso, _paginar, acesso_atual
 from app.api.v1.endpoints.motorista import _dispositivo, _serializar_carregador, _serializar_cobranca, get_db, motorista_logado
 from app.models.carregador import Carregador, Cobranca, Motorista, SessaoCarga, agora
 from app.models.voucher import Voucher, VoucherCarregador, VoucherUso
@@ -108,11 +109,33 @@ def _voucher_do_painel(db: Session, acesso: Acesso, voucher_id: int) -> Voucher:
 
 
 @router.get("/admin/vouchers")
-def listar(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+def listar(
+    pagina: int = 1,
+    por_pagina: int = 25,
+    busca: str | None = None,
+    situacao: str | None = None,
+    db: Session = Depends(get_db),
+    acesso: Acesso = Depends(acesso_atual),
+):
+    """Paginada (mais novo primeiro). situacao: validos | vencidos | cancelados.
+    Esgotado (todos os usos gastos) aparece em validos, marcado como Usado."""
     query = db.query(Voucher)
     if not acesso.admin:
         query = query.filter(Voucher.cliente_id == acesso.cliente_id)
-    return [_serializar(db, v) for v in query.order_by(Voucher.id.desc()).all()]
+    query = _busca(query, busca, Voucher.nome, Voucher.codigo)
+    momento = agora()
+    nao_venceu = or_(Voucher.expira_em.is_(None), Voucher.expira_em > momento)
+    if situacao == "validos":
+        query = query.filter(Voucher.ativo.is_(True), nao_venceu)
+    elif situacao == "vencidos":
+        query = query.filter(Voucher.ativo.is_(True), not_(nao_venceu))
+    elif situacao == "cancelados":
+        query = query.filter(Voucher.ativo.is_(False))
+    elif situacao:
+        raise HTTPException(status_code=422, detail="Situacao invalida")
+    resultado = _paginar(query, pagina, por_pagina, Voucher.id.desc())
+    resultado["itens"] = [_serializar(db, v) for v in resultado["itens"]]
+    return resultado
 
 
 @router.post("/admin/vouchers")

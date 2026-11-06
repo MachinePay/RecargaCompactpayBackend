@@ -30,7 +30,7 @@ def test_voucher_libera_recarga_e_o_link_some(client):
     v = client.post("/api/v1/admin/vouchers", json={"nome": "Cortesia Joao", "minutos": 45, "expira_em": futuro, "carregadores": ["CP-VOU"]}, headers=cab).json()
     assert v["situacao"] == "ativo" and v["cliente_id"] == dono and v["usos"] == 0
     # O cliente ve so os vouchers dele.
-    assert [x["id"] for x in client.get("/api/v1/admin/vouchers", headers=cab).json()] == [v["id"]]
+    assert [x["id"] for x in client.get("/api/v1/admin/vouchers", headers=cab).json()["itens"]] == [v["id"]]
 
     with client.websocket_connect("/ocpp/CP-VOU", subprotocols=["ocpp1.6"]) as ws:
         cp = CarregadorFake(ws)
@@ -50,7 +50,7 @@ def test_voucher_libera_recarga_e_o_link_some(client):
 
         # Usado: o link some e o painel mostra esgotado.
         assert client.get(f"/api/v1/publico/voucher/{v['codigo']}").status_code == 404
-        assert client.get("/api/v1/admin/vouchers", headers=cab).json()[0]["situacao"] == "esgotado"
+        assert client.get("/api/v1/admin/vouchers", headers=cab).json()["itens"][0]["situacao"] == "esgotado"
         # A recarga aparece para o celular que usou, como um Pix.
         assert client.get(f"/api/v1/publico/cobrancas/{recarga['id']}", params={"dispositivo": CELULAR}).json()["sessao"]
 
