@@ -12,6 +12,7 @@ from app.db.migracoes import adicionar_colunas_faltando
 from app.db.session import engine
 import app.models.carregador  # noqa: F401 - registra as tabelas para o create_all
 import app.models.whatsapp  # noqa: F401
+import app.models.voucher  # noqa: F401
 from app.services import diagnostico
 from app.services.pagamentos import start_cobrancas_poller
 from app.services.mercado_pago_caixa import start_mp_caixa_poller
