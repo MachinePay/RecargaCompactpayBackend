@@ -32,6 +32,9 @@ services:
         value: "false"
       - key: MP_ACCESS_TOKEN
         sync: false
+      # Geocoding API do Google: CEP + numero no ponto certo do mapa (opcional).
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
 
 databases:
   - name: compactpay-recarga-db

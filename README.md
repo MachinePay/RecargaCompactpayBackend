@@ -29,6 +29,8 @@ O `render.yaml` cria o servidor e o Postgres juntos.
 3. A chave do painel (`ADMIN_API_KEY`) e' gerada pela Render: veja em
    **Environment**. Entre com ela, crie os usuarios (menu Usuarios) e depois
    use e-mail e senha. Opcional: `JWT_SECRET` (senao deriva da chave de admin).
+   Opcional: `GOOGLE_MAPS_API_KEY` (Geocoding API) para o CEP cair no numero certo do mapa;
+   sem ela usa o OpenStreetMap.
 4. Teste: `https://<seu-servico>.onrender.com/` responde `{"ok": true}`.
 
 Regras:

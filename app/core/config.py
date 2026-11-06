@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # o navegador (e' publica): restrinja no Google ao dominio do site. Vazio =
     # o app usa o mapa da Esri. Aceita tambem o nome VITE_GOOGLE_MAPS_KEY.
     GOOGLE_MAPS_KEY: str = os.getenv("GOOGLE_MAPS_KEY") or os.getenv("VITE_GOOGLE_MAPS_KEY", "")
+    # Chave do servidor (Geocoding API) para o CEP + numero cair no ponto certo
+    # do mapa. Fica so no backend: restrinja no Google por API (Geocoding), nao
+    # por dominio. Vazio = so OpenStreetMap (quase sem numero de casa no Brasil).
+    GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
     # ---- Loja e caixa no MP (igual CompactPay: pagamento na maquininha
     # vinculada ao caixa do carregador libera tempo pela regra de preco) ----

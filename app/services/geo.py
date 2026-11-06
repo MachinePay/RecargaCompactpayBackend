@@ -3,8 +3,9 @@ do carregador).
 
 1. BrasilAPI (CEP v2): endereco e, quando tem, coordenadas da rua.
 2. ViaCEP: reserva para o endereco se a BrasilAPI cair.
-3. Nominatim (OpenStreetMap): coordenadas pela rua e numero; sem achar, o
-   centro da cidade (precisao "cidade").
+3. Google Geocoding (com GOOGLE_MAPS_API_KEY): coordenadas pelo numero da casa.
+4. Nominatim (OpenStreetMap): reserva sem chave ou se o Google falhar; sem
+   achar, o centro da cidade (precisao "cidade").
 Tudo e' aproximado: o ponto exato continua sendo marcado pelo celular.
 """
 import logging
@@ -12,6 +13,8 @@ import re
 
 import httpx
 from fastapi import HTTPException
+
+from app.core.config import settings
 
 AGENTE = "CompactRecarga/1.0 (painel de carregadores)"
 
@@ -47,6 +50,32 @@ def _nominatim(params: dict) -> tuple[float, float] | None:
     return (lat, lng) if lat is not None and lng is not None else None
 
 
+# location_type do Google -> nossa precisao.
+PRECISAO_GOOGLE = {"ROOFTOP": "numero", "RANGE_INTERPOLATED": "numero", "GEOMETRIC_CENTER": "rua", "APPROXIMATE": "cidade"}
+
+
+def _google(endereco: str, cep: str) -> tuple[float, float, str] | None:
+    if not settings.GOOGLE_MAPS_API_KEY:
+        return None
+    try:
+        dados = _get_json(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            {"address": endereco, "components": f"country:BR|postal_code:{cep}", "language": "pt-BR", "key": settings.GOOGLE_MAPS_API_KEY},
+        )
+    except (httpx.HTTPError, ValueError):
+        return None
+    if dados.get("status") != "OK" or not dados.get("results"):
+        # REQUEST_DENIED = chave sem a Geocoding API ativada ou restrita por dominio.
+        logging.warning("[CEP] Google Geocoding: %s %s", dados.get("status"), dados.get("error_message") or "")
+        return None
+    geometria = dados["results"][0].get("geometry") or {}
+    local = geometria.get("location") or {}
+    lat, lng = _coordenada(local.get("lat")), _coordenada(local.get("lng"))
+    if lat is None or lng is None:
+        return None
+    return lat, lng, PRECISAO_GOOGLE.get(geometria.get("location_type"), "rua")
+
+
 def buscar_cep(cep: str, numero: str | None = None) -> dict:
     cep = normalizar_cep(cep)
     rua = bairro = cidade = uf = None
@@ -67,8 +96,11 @@ def buscar_cep(cep: str, numero: str | None = None) -> dict:
         raise HTTPException(status_code=404, detail="CEP nao encontrado")
 
     precisao = "rua" if latitude is not None else None
+    google = _google(", ".join(filter(None, [f"{rua}, {numero}" if rua and numero else rua, bairro, cidade, uf])), cep)
+    if google and google[2] != "cidade":
+        latitude, longitude, precisao = google
     # Com numero, a busca na rua e' mais precisa que a coordenada do CEP.
-    if rua and (numero or latitude is None):
+    elif rua and (numero or latitude is None):
         achado = _nominatim({"street": f"{numero} {rua}".strip() if numero else rua, "city": cidade, "state": uf, "postalcode": cep})
         if achado is None and numero:
             achado = _nominatim({"street": rua, "city": cidade, "state": uf})
