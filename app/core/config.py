@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     RECARGA_MIN_MINUTOS: int = int(os.getenv("RECARGA_MIN_MINUTOS", "10"))
     RECARGA_MAX_MINUTOS: int = int(os.getenv("RECARGA_MAX_MINUTOS", "240"))
 
+    # Chave do Google Maps (Maps JavaScript API) do mapa do motorista. Vai para
+    # o navegador (e' publica): restrinja no Google ao dominio do site. Vazio =
+    # o app usa o mapa da Esri. Aceita tambem o nome VITE_GOOGLE_MAPS_KEY.
+    GOOGLE_MAPS_KEY: str = os.getenv("GOOGLE_MAPS_KEY") or os.getenv("VITE_GOOGLE_MAPS_KEY", "")
+
     # ---- Loja e caixa no MP (igual CompactPay: pagamento na maquininha
     # vinculada ao caixa do carregador libera tempo pela regra de preco) ----
     MP_DEFAULT_STORE_STREET_NAME: str = os.getenv("MP_DEFAULT_STORE_STREET_NAME", "Rua CompactPay")

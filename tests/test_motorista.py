@@ -185,3 +185,9 @@ def test_login_do_motorista_bloqueia_depois_de_muitas_tentativas(client):
     for _ in range(5):
         assert client.post("/api/v1/publico/entrar", json={"telefone": "21999990000", "senha": "errada"}).status_code == 401
     assert client.post("/api/v1/publico/entrar", json={"telefone": "21999990000", "senha": "segredo1"}).status_code == 429
+
+
+def test_config_entrega_a_chave_do_mapa(client, monkeypatch):
+    assert client.get("/api/v1/publico/config").json() == {"google_maps_key": None}
+    monkeypatch.setattr(settings, "GOOGLE_MAPS_KEY", "AIza-teste")
+    assert client.get("/api/v1/publico/config").json() == {"google_maps_key": "AIza-teste"}

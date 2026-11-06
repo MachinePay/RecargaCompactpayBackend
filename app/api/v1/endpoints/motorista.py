@@ -135,6 +135,12 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
     }
 
 
+@router.get("/config")
+def config():
+    """O que o app precisa saber do servidor (chave do mapa do Google)."""
+    return {"google_maps_key": settings.GOOGLE_MAPS_KEY or None}
+
+
 @router.get("/carregadores")
 def listar_carregadores(db: Session = Depends(get_db)):
     carregadores = (
