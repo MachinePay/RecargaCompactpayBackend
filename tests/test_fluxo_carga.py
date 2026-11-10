@@ -577,3 +577,33 @@ def test_corrente_maxima_pelo_painel(client):
         cp.responder(perfil, {"status": "Accepted"})
         pedido.join()
     assert client.get("/api/v1/admin/carregadores/CP-AMPERE", headers=ADMIN).json()["corrente_maxima_a"] == 16
+
+
+def test_le_limite_e_mostra_corrente_medida(client):
+    client.post("/api/v1/admin/carregadores", json={"cliente_id": cliente_teste(client), "id_hardware": "CP-MEDE", "nome_local": "x"}, headers=ADMIN)
+    with client.websocket_connect("/CP-MEDE") as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        # Conector 0 recusado: tenta o conector do carregador.
+        resultado = {}
+        pedido = _em_paralelo(lambda: resultado.update(r=client.post("/api/v1/admin/carregadores/CP-MEDE/corrente/ler", headers=ADMIN).json()))
+        primeiro = cp.receber_chamada("GetCompositeSchedule")
+        assert primeiro[3] == {"connectorId": 0, "duration": 3600, "chargingRateUnit": "A"}
+        cp.responder(primeiro, {"status": "Rejected"})
+        segundo = cp.receber_chamada("GetCompositeSchedule")
+        assert segundo[3]["connectorId"] == 1
+        agenda = {"chargingRateUnit": "A", "chargingSchedulePeriod": [{"startPeriod": 0, "limit": 16}]}
+        cp.responder(segundo, {"status": "Accepted", "connectorId": 1, "chargingSchedule": agenda})
+        pedido.join()
+        assert resultado["r"]["status"] == "Accepted" and resultado["r"]["limite_a"] == 16 and resultado["r"]["conector"] == 1
+
+        amostras = [
+            {"value": "15.8", "measurand": "Current.Import", "unit": "A"},
+            {"value": "16", "measurand": "Current.Offered", "unit": "A"},
+            {"value": "3.5", "measurand": "Power.Active.Import", "unit": "kW"},
+            {"value": "221", "measurand": "Voltage", "unit": "V"},
+        ]
+        cp.chamar("MeterValues", {"connectorId": 1, "meterValue": [{"timestamp": "2026-11-10T12:00:00Z", "sampledValue": amostras}]})
+    medicao = client.get("/api/v1/admin/carregadores/CP-MEDE", headers=ADMIN).json()["medicao"]
+    assert (medicao["corrente_a"], medicao["oferecida_a"], medicao["potencia_w"], medicao["tensao_v"]) == (15.8, 16, 3500, 221)
+    assert medicao["segundos_atras"] is not None and medicao["segundos_atras"] < 60

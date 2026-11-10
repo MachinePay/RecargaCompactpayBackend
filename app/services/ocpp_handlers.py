@@ -399,6 +399,7 @@ def _estornar_depois(sessao_id: int) -> None:
 
 
 def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
+    _guardar_medicao(carregador, payload)
     transaction_id = _inteiro(payload.get("transactionId"))
     sessao = db.get(SessaoCarga, transaction_id) if transaction_id is not None else None
     if sessao is None or sessao.carregador_id != carregador.id_hardware:
@@ -429,12 +430,50 @@ def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
     return {}
 
 
+def _leituras(payload: dict) -> dict[str, float]:
+    """Medicoes do MeterValues em A, W e V. Corrente: a maior fase; potencia:
+    soma das fases (ou o total, quando vem sem fase)."""
+    fases: dict[str, dict[str, float]] = {}
+    for meter_value in payload.get("meterValue") or []:
+        for amostra in meter_value.get("sampledValue") or []:
+            measurand = amostra.get("measurand")
+            if measurand not in ("Current.Import", "Current.Offered", "Power.Active.Import", "Voltage"):
+                continue
+            try:
+                valor = float(amostra.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if amostra.get("unit") == "kW":
+                valor *= 1000
+            fases.setdefault(measurand, {})[amostra.get("phase") or "total"] = valor
+    resultado = {}
+    for measurand, valores in fases.items():
+        if measurand == "Power.Active.Import":
+            resultado[measurand] = valores["total"] if "total" in valores else sum(valores.values())
+        else:
+            resultado[measurand] = max(valores.values())
+    return resultado
+
+
+def _guardar_medicao(carregador: Carregador, payload: dict) -> None:
+    leituras = _leituras(payload)
+    if not leituras:
+        return
+    carregador.medido_corrente_a = leituras.get("Current.Import", carregador.medido_corrente_a)
+    carregador.medido_oferecida_a = leituras.get("Current.Offered", carregador.medido_oferecida_a)
+    carregador.medido_potencia_w = leituras.get("Power.Active.Import", carregador.medido_potencia_w)
+    carregador.medido_tensao_v = leituras.get("Voltage", carregador.medido_tensao_v)
+    carregador.medido_em = agora()
+
+
 def _corrente(payload: dict) -> float:
-    """Maior corrente (A) informada no MeterValues; 0 se nao veio."""
+    """Maior corrente (A) que o carro puxa no MeterValues; 0 se nao veio.
+    Current.Offered fica de fora: e' o limite oferecido, nao consumo."""
     maior = 0.0
     for meter_value in payload.get("meterValue") or []:
         for amostra in meter_value.get("sampledValue") or []:
-            if str(amostra.get("measurand") or "").startswith("Current"):
+            measurand = str(amostra.get("measurand") or "")
+            if measurand.startswith("Current") and measurand != "Current.Offered":
                 try:
                     maior = max(maior, float(amostra.get("value")))
                 except (TypeError, ValueError):

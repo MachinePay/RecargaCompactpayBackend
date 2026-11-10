@@ -132,6 +132,14 @@ class Carregador(Base):
     # Corrente maxima (A) definida no painel; o servidor manda ao carregador
     # (SetChargingProfile) e repete quando ele reconecta. Vazio = a do aparelho.
     corrente_maxima_a = Column(Integer, nullable=True)
+    # Ultima medicao do MeterValues: corrente que o carro puxa (Current.Import),
+    # corrente que o carregador oferece ao carro (Current.Offered = limite em
+    # vigor), potencia e tensao. So aparece se o carregador mandar.
+    medido_corrente_a = Column(Float, nullable=True)
+    medido_oferecida_a = Column(Float, nullable=True)
+    medido_potencia_w = Column(Float, nullable=True)
+    medido_tensao_v = Column(Float, nullable=True)
+    medido_em = Column(DateTime, nullable=True)
 
     # Preenchidos pelo proprio carregador (BootNotification/StatusNotification).
     vendor = Column(String, nullable=True)

@@ -257,6 +257,14 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "online_desde": conexao["desde"] if conexao else None,
         "ip": conexao["ip"] if conexao else None,
         "corrente_maxima_a": carregador.corrente_maxima_a,
+        "medicao": {
+            "corrente_a": carregador.medido_corrente_a,
+            "oferecida_a": carregador.medido_oferecida_a,
+            "potencia_w": carregador.medido_potencia_w,
+            "tensao_v": carregador.medido_tensao_v,
+            "em": carregador.medido_em,
+            "segundos_atras": int((agora() - carregador.medido_em).total_seconds()) if carregador.medido_em else None,
+        },
         "cep": carregador.cep,
         "endereco": carregador.endereco,
         "latitude": carregador.latitude,
@@ -1337,3 +1345,40 @@ def definir_corrente(carregador_id: str, dados: CorrenteDados, db: Session = Dep
         registrar_historico(db, carregador_id, "DISPOSITIVO", f"Corrente maxima definida em {dados.amperes} A")
         db.commit()
     return {"resposta": resposta, "corrente_maxima_a": carregador.corrente_maxima_a}
+
+
+@router.post("/carregadores/{carregador_id}/corrente/ler")
+def ler_corrente(carregador_id: str, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    """Pergunta ao carregador o limite em vigor (GetCompositeSchedule).
+    Tenta o carregador inteiro (conector 0) e depois o conector dele."""
+    carregador = _checar_acesso(db, acesso, carregador_id)
+    if not ocpp_server.esta_conectado(carregador_id):
+        raise HTTPException(status_code=409, detail="Carregador offline")
+    resposta: dict = {}
+    conector = 0
+    for conector in dict.fromkeys((0, carregador.connector_id or 1)):
+        futuro = ocpp_server.enviar_chamada(
+            carregador_id, "GetCompositeSchedule", {"connectorId": conector, "duration": 3600, "chargingRateUnit": "A"}
+        )
+        try:
+            resposta = futuro.result(timeout=OCPP_RESPOSTA_TIMEOUT_SECONDS) if futuro else {}
+        except concurrent.futures.TimeoutError:
+            raise HTTPException(status_code=504, detail="O carregador nao respondeu: este firmware pode nao suportar GetCompositeSchedule")
+        except ocpp_server.ErroOcpp as exc:
+            raise HTTPException(status_code=502, detail=f"O carregador nao suporta ler o limite ({exc.codigo})")
+        if (resposta or {}).get("status") == "Accepted":
+            break
+    agenda = (resposta or {}).get("chargingSchedule") or {}
+    periodos = sorted(agenda.get("chargingSchedulePeriod") or [], key=lambda p: p.get("startPeriod", 0))
+    limite = periodos[0].get("limit") if periodos else None
+    unidade = agenda.get("chargingRateUnit") or "A"
+    if limite is not None and unidade == "W":
+        limite = round(float(limite) / 220, 1)  # monofasico 220 V
+    return {
+        "status": (resposta or {}).get("status"),
+        "conector": conector,
+        "limite_a": float(limite) if limite is not None else None,
+        "unidade_original": unidade,
+        "configurado_a": carregador.corrente_maxima_a,
+        "resposta": resposta,
+    }
