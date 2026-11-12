@@ -274,6 +274,27 @@ def enviar_teste(db, cliente: Cliente) -> int:
     return enviados
 
 
+def enviar_teste_numero(db, telefone: str) -> str:
+    """Teste para qualquer numero (antes de ter clientes configurados)."""
+    numero = normalizar_telefone(telefone)
+    if not numero:
+        raise WhatsappErro("Numero invalido: use DDD + numero, ex.: (11) 98765-4321.")
+    config = obter_config(db)
+    texto = "✅ *CompactRecarga*\n\nTeste de aviso pelo WhatsApp. Se chegou, a conexao esta funcionando!"
+    envio = WhatsappEnvio(cliente_id=None, carregador_ids="", tipo="teste", telefone=numero, mensagem=texto)
+    try:
+        enviar_texto(config, numero, texto)
+        envio.status = "enviado"
+    except WhatsappErro as exc:
+        envio.status = "erro"
+        envio.erro = str(exc)[:500]
+    db.add(envio)
+    db.commit()
+    if envio.status != "enviado":
+        raise WhatsappErro(envio.erro or "Nao foi possivel enviar.")
+    return numero
+
+
 def enviar_resumo_agora(db, cliente: Cliente) -> int:
     """Resumo de hoje fora do horario (botao da tela); nao mexe no "ja enviado hoje"."""
     config = obter_config(db)

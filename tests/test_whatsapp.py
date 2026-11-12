@@ -63,3 +63,28 @@ def test_avisa_offline_uma_vez_voltou_e_resumo(client, monkeypatch):
     assert "Voltaram" in enviados[-1][1]
     historico = client.get("/api/v1/admin/whatsapp", headers=ADMIN).json()["envios"]
     assert {e["tipo"] for e in historico} >= {"offline", "resumo", "voltou"}
+
+
+def test_teste_para_qualquer_numero_contadores_e_clientes_paginados(client, monkeypatch):
+    enviados = []
+
+    def evolution_falsa(config, caminho, method="GET", body=None):
+        if caminho.startswith("/instance/connectionState/"):
+            return {"instance": {"state": "open"}}
+        if caminho.startswith("/message/sendText/"):
+            enviados.append(body["number"])
+            return {}
+        raise AssertionError(caminho)
+
+    monkeypatch.setattr(wa, "_chamar", evolution_falsa)
+    client.put("/api/v1/admin/whatsapp/config", json={"evolution_url": "https://evo.exemplo", "api_key": "chave-1234567", "instancia": "recarga"}, headers=ADMIN)
+    assert client.post("/api/v1/admin/whatsapp/teste", json={"telefone": "123"}, headers=ADMIN).status_code == 502
+    r = client.post("/api/v1/admin/whatsapp/teste", json={"telefone": "(21) 99876-5432"}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["telefone"] == "5521998765432" and enviados[-1] == "5521998765432"
+    tela = client.get("/api/v1/admin/whatsapp", headers=ADMIN).json()
+    assert tela["contadores"]["enviados_24h"] >= 1 and "clientes" not in tela
+
+    for i in range(3):
+        client.post("/api/v1/admin/clientes", json={"nome_empresa": f"Rede Zap {i}", "telefone": f"(11) 97777-000{i}", "cliente_mercado_pago": True}, headers=ADMIN)
+    pagina = client.get("/api/v1/admin/whatsapp/clientes", params={"busca": "rede zap", "por_pagina": 2}, headers=ADMIN).json()
+    assert pagina["total"] == 3 and len(pagina["itens"]) == 2 and pagina["itens"][0]["telefones_validos"] == ["5511977770000"]

@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.v1.endpoints.admin import exigir_admin, get_db
+from datetime import timedelta
+
+from sqlalchemy import func
+
+from app.api.v1.endpoints.admin import _busca, _paginar, exigir_admin, get_db
 from app.models.carregador import Cliente, agora
 from app.models.whatsapp import WhatsappCliente, WhatsappEnvio
 from app.services import whatsapp_alertas as wa
@@ -38,28 +42,30 @@ def _erro(exc: wa.WhatsappErro) -> HTTPException:
     return HTTPException(status_code=502, detail=str(exc))
 
 
+def _serializar_cliente(cliente: Cliente, e: WhatsappCliente | None) -> dict:
+    return {
+        "id": cliente.id,
+        "nome_empresa": cliente.nome_empresa,
+        "telefone": cliente.telefone,
+        "telefones_validos": wa.telefones_do_cliente(cliente),
+        "ativo": bool(e and e.ativo),
+        "recebe_lembrete": bool(e and e.recebe_lembrete),
+        "recebe_voltou": bool(e and e.recebe_voltou),
+        "resumo_diario": bool(e and e.resumo_diario),
+        "resumo_horario": e.resumo_horario if e else None,
+        "resumo_ultimo_dia": e.resumo_ultimo_dia if e else None,
+    }
+
+
 def _tela(db: Session) -> dict:
     config = wa.obter_config(db)
-    escolhas = {e.cliente_id: e for e in db.query(WhatsappCliente).all()}
-    clientes = []
-    for cliente in db.query(Cliente).order_by(Cliente.nome_empresa).all():
-        e = escolhas.get(cliente.id)
-        clientes.append(
-            {
-                "id": cliente.id,
-                "nome_empresa": cliente.nome_empresa,
-                "telefone": cliente.telefone,
-                "telefones_validos": wa.telefones_do_cliente(cliente),
-                "ativo": bool(e and e.ativo),
-                "recebe_lembrete": bool(e and e.recebe_lembrete),
-                "recebe_voltou": bool(e and e.recebe_voltou),
-                "resumo_diario": bool(e and e.resumo_diario),
-                "resumo_horario": e.resumo_horario if e else None,
-                "resumo_ultimo_dia": e.resumo_ultimo_dia if e else None,
-            }
-        )
     envios = db.query(WhatsappEnvio).order_by(WhatsappEnvio.id.desc()).limit(40).all()
-    nomes = {c["id"]: c["nome_empresa"] for c in clientes}
+    ids_clientes = {e.cliente_id for e in envios if e.cliente_id}
+    nomes = {c.id: c.nome_empresa for c in db.query(Cliente).filter(Cliente.id.in_(ids_clientes))} if ids_clientes else {}
+    desde = agora() - timedelta(hours=24)
+    por_status = dict(
+        db.query(WhatsappEnvio.status, func.count(WhatsappEnvio.id)).filter(WhatsappEnvio.created_at >= desde).group_by(WhatsappEnvio.status).all()
+    )
     chave = config.api_key or ""
     return {
         "config": {
@@ -78,7 +84,11 @@ def _tela(db: Session) -> dict:
             "ultimo_ciclo_status": config.ultimo_ciclo_status,
         },
         "conexao": wa.conexao_para_tela(config),
-        "clientes": clientes,
+        "contadores": {
+            "enviados_24h": por_status.get("enviado", 0),
+            "erros_24h": por_status.get("erro", 0),
+            "clientes_avisados": db.query(WhatsappCliente).filter(WhatsappCliente.ativo.is_(True)).count(),
+        },
         "envios": [
             {
                 "id": envio.id,
@@ -134,6 +144,29 @@ def salvar_config(dados: ConfigDados, db: Session = Depends(get_db)):
     config.updated_at = agora()
     db.commit()
     return _tela(db)
+
+
+@router.get("/clientes")
+def listar_clientes(pagina: int = 1, por_pagina: int = 25, busca: str | None = None, db: Session = Depends(get_db)):
+    """Quem recebe os avisos, paginado (o numero vem do cadastro do cliente)."""
+    query = _busca(db.query(Cliente), busca, Cliente.nome_empresa, Cliente.telefone)
+    resultado = _paginar(query, pagina, por_pagina, Cliente.nome_empresa.asc())
+    ids = [c.id for c in resultado["itens"]]
+    escolhas = {e.cliente_id: e for e in db.query(WhatsappCliente).filter(WhatsappCliente.cliente_id.in_(ids))} if ids else {}
+    resultado["itens"] = [_serializar_cliente(c, escolhas.get(c.id)) for c in resultado["itens"]]
+    return resultado
+
+
+class TesteNumero(BaseModel):
+    telefone: str
+
+
+@router.post("/teste")
+def testar_numero(dados: TesteNumero, db: Session = Depends(get_db)):
+    try:
+        return {"telefone": wa.enviar_teste_numero(db, dados.telefone)}
+    except wa.WhatsappErro as exc:
+        raise _erro(exc) from exc
 
 
 @router.post("/conectar")
