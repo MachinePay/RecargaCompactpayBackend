@@ -63,9 +63,14 @@ def _sessoes(db, de: datetime, ate: datetime, ids: list[str]) -> list[SessaoCarg
     return db.query(SessaoCarga).filter(SessaoCarga.inicio >= de, SessaoCarga.inicio < ate, SessaoCarga.carregador_id.in_(ids)).all()
 
 
+def _liquido(venda: Cobranca) -> float:
+    """Valor que ficou: no modo kWh, a sobra devolvida ao motorista sai."""
+    return venda.valor - (venda.valor_devolvido or 0)
+
+
 def _somar(vendas: list[Cobranca], sessoes: list[SessaoCarga]) -> dict:
     validas = [v for v in vendas if v.estornada_em is None]
-    faturamento = round(sum(v.valor for v in validas), 2)
+    faturamento = round(sum(_liquido(v) for v in validas), 2)
     return {
         "faturamento": faturamento,
         "vendas": len(validas),
@@ -75,6 +80,7 @@ def _somar(vendas: list[Cobranca], sessoes: list[SessaoCarga]) -> dict:
         "minutos_vendidos": sum(v.minutos for v in validas),
         "estornos_qtd": len(vendas) - len(validas),
         "estornos_valor": round(sum(v.valor for v in vendas if v.estornada_em is not None), 2),
+        "devolvido_kwh": round(sum(v.valor_devolvido or 0 for v in validas), 2),
     }
 
 
@@ -106,13 +112,13 @@ def gerar(db, periodo: str, inicio: date | None, fim: date | None, cliente_id: i
             continue
         local = venda.pago_em - FUSO
         dia = por_dia[local.date()]
-        dia["faturamento"] = round(dia["faturamento"] + venda.valor, 2)
+        dia["faturamento"] = round(dia["faturamento"] + _liquido(venda), 2)
         dia["vendas"] += 1
         celula = grade[local.weekday()][local.hour]
-        celula["faturamento"] = round(celula["faturamento"] + venda.valor, 2)
+        celula["faturamento"] = round(celula["faturamento"] + _liquido(venda), 2)
         celula["vendas"] += 1
         metodo = por_metodo.setdefault(venda.metodo or venda.origem, {"metodo": venda.metodo or venda.origem, "valor": 0.0, "vendas": 0})
-        metodo["valor"] = round(metodo["valor"] + venda.valor, 2)
+        metodo["valor"] = round(metodo["valor"] + _liquido(venda), 2)
         metodo["vendas"] += 1
     for sessao in sessoes:
         dia = por_dia[(sessao.inicio - FUSO).date()]

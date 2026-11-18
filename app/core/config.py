@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     PIX_EXPIRA_SEGUNDOS: int = int(os.getenv("PIX_EXPIRA_SEGUNDOS", "300"))
     # O MP exige e-mail do pagador no Pix; o motorista nao se cadastra.
     PIX_EMAIL_PAGADOR: str = os.getenv("PIX_EMAIL_PAGADOR", "motorista@compactrecarga.com.br")
+    # ---- Cobranca por kWh ----
+    # Teto de tempo de uma recarga por kWh (o carregador pode mudar no painel).
+    KWH_TEMPO_MAXIMO_MINUTOS: int = int(os.getenv("KWH_TEMPO_MAXIMO_MINUTOS", "480"))
+    # Para um pouco antes da meta: a leitura do medidor chega a cada X segundos
+    # e o carro continua puxando ate o stop chegar.
+    KWH_FOLGA_PARADA_WH: int = int(os.getenv("KWH_FOLGA_PARADA_WH", "30"))
+    # Sobra menor que isso nao e' devolvida (nao vale um estorno de centavos).
+    KWH_DEVOLUCAO_MINIMA: float = float(os.getenv("KWH_DEVOLUCAO_MINIMA", "1.00"))
+    # Faixa de energia que o motorista pode escolher no app.
+    RECARGA_MIN_KWH: float = float(os.getenv("RECARGA_MIN_KWH", "1"))
+    RECARGA_MAX_KWH: float = float(os.getenv("RECARGA_MAX_KWH", "100"))
     # Faixa de tempo que o motorista pode escolher.
     RECARGA_MIN_MINUTOS: int = int(os.getenv("RECARGA_MIN_MINUTOS", "10"))
     RECARGA_MAX_MINUTOS: int = int(os.getenv("RECARGA_MAX_MINUTOS", "240"))

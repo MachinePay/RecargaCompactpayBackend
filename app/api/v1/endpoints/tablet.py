@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, PacoteTempo, SessaoCarga, TerminalTablet
-from app.services import ocpp_server, pagamentos, sessoes, terminais
+from app.services import cobranca_kwh, ocpp_server, pagamentos, sessoes, terminais
 from app.services.ocpp_handlers import energia_kwh
 
 router = APIRouter(prefix="/carregador", tags=["tablet"])
@@ -55,6 +55,9 @@ def serializar_sessao(sessao: SessaoCarga) -> dict:
         "carregador_id": sessao.carregador_id,
         "status": sessao.status,
         "minutos_pagos": sessao.minutos_pagos,
+        # Recarga por kWh: energia paga e o que falta (vazio = por tempo).
+        "kwh_pagos": sessao.kwh_pagos,
+        "kwh_restantes": cobranca_kwh.kwh_restantes(sessao),
         "inicio": sessao.inicio,
         "fim_previsto": sessao.fim_previsto,
         "fim_real": sessao.fim_real,
@@ -67,12 +70,16 @@ def serializar_sessao(sessao: SessaoCarga) -> dict:
 @router.get("/carregadores/{carregador_id}")
 def obter_carregador(carregador_id: str, db: Session = Depends(get_db), terminal=Depends(get_terminal)):
     carregador = _obter_carregador(db, carregador_id)
-    pacotes = (
-        db.query(PacoteTempo)
+    por_kwh = cobranca_kwh.cobra_por_kwh(carregador)
+    pacotes = [
+        p
+        for p in db.query(PacoteTempo)
         .filter(PacoteTempo.carregador_id == carregador_id, PacoteTempo.ativo.is_(True))
         .order_by(PacoteTempo.ordem, PacoteTempo.valor)
         .all()
-    )
+        # So os pacotes do modo em vigor (energia no kWh, minutos no tempo).
+        if bool(p.kwh) == por_kwh
+    ]
     ativa = sessoes.sessao_ativa(db, carregador_id)
     online = ocpp_server.esta_conectado(carregador_id)
     return {
@@ -83,7 +90,9 @@ def obter_carregador(carregador_id: str, db: Session = Depends(get_db), terminal
         "cabo_conectado": carregador.status_conector in ("Preparing", "SuspendedEV", "SuspendedEVSE", "Charging"),
         "disponivel": online and ativa is None and carregador.status_conector in STATUS_CONECTOR_VENDAVEL,
         "sessao_ativa": serializar_sessao(ativa) if ativa else None,
-        "pacotes": [{"id": p.id, "nome": p.nome, "minutos": p.minutos, "valor": p.valor} for p in pacotes],
+        "modo_cobranca": "kwh" if por_kwh else "tempo",
+        "preco_kwh": carregador.preco_kwh if por_kwh else None,
+        "pacotes": [{"id": p.id, "nome": p.nome, "minutos": p.minutos, "kwh": p.kwh, "valor": p.valor} for p in pacotes],
     }
 
 
@@ -93,6 +102,8 @@ def criar_cobranca(dados: CobrancaCreate, db: Session = Depends(get_db), termina
     pacote = db.get(PacoteTempo, dados.pacote_id)
     if not pacote or not pacote.ativo or pacote.carregador_id != carregador.id_hardware:
         raise HTTPException(status_code=404, detail="Pacote nao encontrado")
+    if bool(pacote.kwh) != cobranca_kwh.cobra_por_kwh(carregador):
+        raise HTTPException(status_code=409, detail="Este pacote e' de outro modo de cobranca; recarregue a tela")
     # Nao cobra se nao da pra entregar: offline, ocupado ou com defeito.
     if not ocpp_server.esta_conectado(carregador.id_hardware):
         raise HTTPException(status_code=409, detail="Carregador offline")
@@ -118,7 +129,10 @@ def _serializar_cobranca(db: Session, cobranca: Cobranca) -> dict:
         "carregador_id": cobranca.carregador_id,
         "status": cobranca.status,
         "minutos": cobranca.minutos,
+        "kwh": cobranca.kwh,
         "valor": cobranca.valor,
+        "valor_consumido": cobranca.valor_consumido,
+        "valor_devolvido": cobranca.valor_devolvido,
         "origem": cobranca.origem,
         "estornada": cobranca.estornada_em is not None,
         "sessao": serializar_sessao(sessao) if sessao else None,

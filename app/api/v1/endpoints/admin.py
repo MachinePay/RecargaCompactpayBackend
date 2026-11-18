@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, exists, func, not_, or_, select
 from sqlalchemy.orm import Session
@@ -15,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
-from app.services import auth, diagnostico, geo, trava, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
+from app.services import auth, cobranca_kwh, diagnostico, geo, trava, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh, registrar_historico
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -121,6 +123,11 @@ class CarregadorUpdate(BaseModel):
     longitude: float | None = Field(default=None, ge=-180, le=180)
     preco_valor: float | None = Field(default=None, gt=0)
     preco_minutos: int | None = Field(default=None, gt=0, le=24 * 60)
+    # Cobranca por kWh (ver services/cobranca_kwh.py).
+    modo_cobranca: Literal["tempo", "kwh"] | None = None
+    preco_kwh: float | None = Field(default=None, gt=0, le=50)
+    kwh_tempo_maximo_min: int | None = Field(default=None, ge=10, le=24 * 60)
+    devolver_sobra: bool | None = None
 
 
 class ClienteDados(BaseModel):
@@ -166,8 +173,10 @@ class PagamentoSimulado(BaseModel):
 
 
 class PacoteCreate(BaseModel):
+    """Pacote de tempo (minutos) ou de energia (kwh), um ou outro."""
     nome: str = Field(min_length=1, max_length=40)
-    minutos: int = Field(gt=0, le=24 * 60)
+    minutos: int | None = Field(default=None, gt=0, le=24 * 60)
+    kwh: float | None = Field(default=None, gt=0, le=200)
     valor: float = Field(gt=0)
     ordem: int = 0
 
@@ -286,6 +295,11 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "tem_token_mp": bool(pagamentos.token_do_carregador(carregador)),
         "preco_valor": carregador.preco_valor,
         "preco_minutos": carregador.preco_minutos,
+        "modo_cobranca": carregador.modo_cobranca or "tempo",
+        "preco_kwh": carregador.preco_kwh,
+        "kwh_tempo_maximo_min": carregador.kwh_tempo_maximo_min,
+        "kwh_tempo_maximo_padrao": settings.KWH_TEMPO_MAXIMO_MINUTOS,
+        "devolver_sobra": carregador.devolver_sobra is not False,
         "mp_store_id": carregador.mp_store_id,
         "mp_store_external_id": carregador.mp_store_external_id,
         "mp_pos_id": carregador.mp_pos_id,
@@ -330,7 +344,8 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         # cadastro novo, sem a configuracao antiga; o historico continua.
         carregador = existente
         for campo in ("mp_user_id", "mp_store_id", "mp_store_external_id", "mp_pos_id", "mp_pos_external_id",
-                      "preco_valor", "preco_minutos", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
+                      "preco_valor", "preco_minutos", "modo_cobranca", "preco_kwh",
+                      "kwh_tempo_maximo_min", "devolver_sobra", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
             setattr(carregador, campo, None)
         for campo, valor in campos.items():
             setattr(carregador, campo, valor)
@@ -545,7 +560,7 @@ def listar_pacotes(carregador_id: str, db: Session = Depends(get_db)):
         .order_by(PacoteTempo.ordem, PacoteTempo.valor)
         .all()
     )
-    return [{"id": p.id, "nome": p.nome, "minutos": p.minutos, "valor": p.valor, "ordem": p.ordem} for p in pacotes]
+    return [{"id": p.id, "nome": p.nome, "minutos": p.minutos, "kwh": p.kwh, "valor": p.valor, "ordem": p.ordem} for p in pacotes]
 
 
 @router.get("/resumo")
@@ -570,7 +585,8 @@ def resumo(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)
         "carregadores_total": len(carregadores),
         "carregadores_online": sum(1 for c in carregadores if ocpp_server.esta_conectado(c.id_hardware)),
         "sessoes_ativas": db.query(SessaoCarga).filter(SessaoCarga.status.in_(STATUS_SESSAO_ATIVA), SessaoCarga.carregador_id.in_(ids)).count(),
-        "faturamento_hoje": round(sum(v.valor for v in vendas), 2),
+        # Sobra devolvida no modo kWh nao e' faturamento.
+        "faturamento_hoje": round(sum(v.valor - (v.valor_devolvido or 0) for v in vendas), 2),
         "vendas_hoje": len(vendas),
         "energia_hoje_kwh": round(sum(energia_kwh(s) for s in sessoes_hoje), 3),
         "estornos_pendentes": db.query(Cobranca)
@@ -589,6 +605,10 @@ def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Sessio
         # O caixa e' da conta MP do cliente antigo; outro dono precisa de caixa novo.
         carregador.mp_user_id = carregador.mp_store_id = carregador.mp_store_external_id = None
         carregador.mp_pos_id = carregador.mp_pos_external_id = None
+    modo = campos.get("modo_cobranca", carregador.modo_cobranca)
+    preco_kwh = campos.get("preco_kwh", carregador.preco_kwh)
+    if modo == "kwh" and not preco_kwh:
+        raise HTTPException(status_code=422, detail="Para cobrar por kWh, informe o preco do kWh")
     renomeou = "nome_local" in campos and campos["nome_local"] != carregador.nome_local
     for campo, valor in campos.items():
         setattr(carregador, campo, valor)
@@ -644,10 +664,14 @@ def historico_carregador(
 @router.post("/carregadores/{carregador_id}/pacotes", dependencies=[Depends(exigir_admin)])
 def criar_pacote(carregador_id: str, dados: PacoteCreate, db: Session = Depends(get_db)):
     _obter(db, carregador_id)
-    pacote = PacoteTempo(carregador_id=carregador_id, **dados.model_dump())
+    if (dados.minutos is None) == (dados.kwh is None):
+        raise HTTPException(status_code=422, detail="Informe os minutos (pacote de tempo) ou os kWh (pacote de energia)")
+    campos = dados.model_dump()
+    campos["minutos"] = dados.minutos or 0  # pacote de energia: o teto vem do carregador
+    pacote = PacoteTempo(carregador_id=carregador_id, **campos)
     db.add(pacote)
     db.commit()
-    return {"id": pacote.id, **dados.model_dump()}
+    return {"id": pacote.id, **campos}
 
 
 @router.delete("/pacotes/{pacote_id}", dependencies=[Depends(exigir_admin)])
@@ -757,6 +781,19 @@ def listar_sessoes(carregador_id: str | None = None, limite: int = 50, db: Sessi
     return _serializar_sessoes(db, query.order_by(SessaoCarga.id.desc()).limit(min(limite, POR_PAGINA_MAX)).all())
 
 
+def _acerto_kwh(db: Session, sessao: SessaoCarga) -> dict:
+    if sessao.kwh_pagos is None:
+        return {"valor_consumido": None, "valor_devolvido": None, "acerto_erro": None}
+    cobrancas = cobranca_kwh.cobrancas_da_sessao(db, sessao)
+    consumidos = [c.valor_consumido for c in cobrancas if c.valor_consumido is not None]
+    return {
+        "valor_pago": round(sum(c.valor for c in cobrancas if c.status == "aprovada"), 2),
+        "valor_consumido": round(sum(consumidos), 2) if consumidos else None,
+        "valor_devolvido": round(sum(c.valor_devolvido or 0 for c in cobrancas), 2),
+        "acerto_erro": sessao.acerto_erro,
+    }
+
+
 def _serializar_sessoes(db: Session, lista: list[SessaoCarga]) -> list[dict]:
     cobrancas = {c.id: c for c in db.query(Cobranca).filter(Cobranca.id.in_([s.cobranca_id for s in lista])).all()}
     resposta = []
@@ -767,6 +804,8 @@ def _serializar_sessoes(db: Session, lista: list[SessaoCarga]) -> list[dict]:
                 **serializar_sessao(sessao),
                 "created_at": sessao.created_at,
                 "valor": cobranca.valor if cobranca else None,
+                # Modo kWh: soma de todos os pagamentos da recarga (o primeiro + os somados).
+                **_acerto_kwh(db, sessao),
                 "origem": cobranca.origem if cobranca else None,
                 "metodo": cobranca.metodo if cobranca else None,
                 "estornada": bool(cobranca and cobranca.estornada_em),
@@ -884,7 +923,10 @@ def simular_pagamento_caixa(carregador_id: str, dados: PagamentoSimulado, db: Se
     """Como se a maquininha do caixa tivesse aprovado este valor: passa pela
     mesma regra de preco e liberacao, sem chamar o Mercado Pago."""
     carregador = _obter(db, carregador_id)
-    if not mercado_pago_caixa.minutos_por_valor(carregador, dados.valor):
+    if cobranca_kwh.cobra_por_kwh(carregador):
+        if not cobranca_kwh.kwh_por_valor(carregador, dados.valor):
+            raise HTTPException(status_code=422, detail="Configure o preco do kWh do carregador antes")
+    elif not mercado_pago_caixa.minutos_por_valor(carregador, dados.valor):
         raise HTTPException(status_code=422, detail="Configure a regra de preco do carregador antes (ex.: R$ 10 = 20 min)")
     cobranca = mercado_pago_caixa.registrar_pagamento(
         db, carregador, dados.valor, f"sim-{uuid4().hex[:10]}", "simulado", origem="simulado"
@@ -893,6 +935,7 @@ def simular_pagamento_caixa(carregador_id: str, dados: PagamentoSimulado, db: Se
     ativa = sessoes.sessao_ativa(db, carregador_id)
     return {
         "minutos": cobranca.minutos,
+        "kwh": cobranca.kwh,
         "valor": cobranca.valor,
         "estornada": bool(cobranca.estornada_em),
         "sessao": serializar_sessao(ativa) if ativa else None,
@@ -1320,6 +1363,31 @@ def estornar_sessao(sessao_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=cobranca.estorno_erro or "O banco recusou o estorno")
     return {"ok": True}
 
+
+
+@router.post("/sessoes/{sessao_id}/devolver-sobra", dependencies=[Depends(exigir_admin)])
+def devolver_sobra(sessao_id: int, db: Session = Depends(get_db)):
+    """Recarga por kWh em que o banco recusou devolver a sobra: tenta de novo.
+    So devolve o que o acerto calculou e ainda nao voltou."""
+    sessao = db.get(SessaoCarga, sessao_id)
+    if sessao is None or sessao.kwh_pagos is None:
+        raise HTTPException(status_code=404, detail="Recarga por kWh nao encontrada")
+    if sessao.acerto_em is None:
+        raise HTTPException(status_code=409, detail="A recarga ainda nao terminou")
+    pendentes = [
+        c for c in cobranca_kwh.cobrancas_da_sessao(db, sessao)
+        if c.valor_consumido is not None and not c.valor_devolvido and not c.estornada_em
+        and round(c.valor - c.valor_consumido, 2) >= settings.KWH_DEVOLUCAO_MINIMA
+    ]
+    if not pendentes:
+        raise HTTPException(status_code=409, detail="Nao ha sobra para devolver")
+    falhas = [c for c in pendentes if not pagamentos.devolver_parte(db, c, c.valor - c.valor_consumido)]
+    if falhas:
+        db.refresh(falhas[0])
+        raise HTTPException(status_code=502, detail=falhas[0].estorno_erro or "O banco recusou a devolucao")
+    sessao.acerto_erro = None
+    db.commit()
+    return {"ok": True, **_acerto_kwh(db, sessao)}
 
 
 class CorrenteDados(BaseModel):

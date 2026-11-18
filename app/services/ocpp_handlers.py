@@ -297,7 +297,9 @@ def _start_transaction(db, carregador: Carregador, payload: dict) -> dict:
         db,
         carregador.id_hardware,
         "SESSAO",
-        f"Sessao {sessao.id} comecou a carregar ({sessao.minutos_pagos} min pagos)",
+        f"Sessao {sessao.id} comecou a carregar ("
+        + (f"{sessao.kwh_pagos:.2f} kWh pagos" if sessao.kwh_pagos is not None else f"{sessao.minutos_pagos} min pagos")
+        + ")",
     )
     return {"transactionId": sessao.id, "idTagInfo": {"status": "Accepted"}}
 
@@ -361,7 +363,9 @@ def _stop_transaction(db, carregador: Carregador, payload: dict) -> dict:
     sessao.status = "finalizada"
     sessao.fim_real = agora()
     sessao.meter_fim_wh = _inteiro(payload.get("meterStop"))
-    if sessao.meter_fim_wh is not None:
+    # O JST-901 manda meterStop "0": so vale se nao for menor que a ultima
+    # leitura (senao a recarga por kWh daria consumo zero e devolveria tudo).
+    if sessao.meter_fim_wh is not None and (sessao.meter_atual_wh is None or sessao.meter_fim_wh >= sessao.meter_atual_wh):
         sessao.meter_atual_wh = sessao.meter_fim_wh
     sessao.motivo_fim = sessao.motivo_fim or MOTIVOS_PARADA.get(reason, reason)
     if nao_puxou:
@@ -424,10 +428,29 @@ def _meter_values(db, carregador: Carregador, payload: dict) -> dict:
                 continue
             if amostra.get("unit") == "kWh":
                 valor *= 1000
+            if sessao.meter_inicio_wh is None:
+                # Sem meterStart no StartTransaction: a primeira leitura vira o inicio.
+                sessao.meter_inicio_wh = int(valor)
+            elif sessao.meter_inicio_wh == 0 and sessao.meter_atual_wh is None and int(valor) > _energia_possivel_wh(sessao):
+                # meterStart "0" com o medidor mandando o total da vida do
+                # aparelho: a recarga por kWh pararia na hora. Recomeca daqui.
+                registrar_historico(
+                    db, carregador.id_hardware, "SESSAO",
+                    f"Sessao {sessao.id}: meterStart {sessao.meter_inicio_wh} Wh nao bate com o medidor ({int(valor)} Wh); contando a partir do medidor",
+                )
+                sessao.meter_inicio_wh = int(valor)
+            if sessao.meter_atual_wh is not None and int(valor) < sessao.meter_atual_wh:
+                continue  # leitura velha fora de ordem: o medidor so sobe
             sessao.meter_atual_wh = int(valor)
     if sessao.meter_inicio_wh is not None and sessao.meter_atual_wh is not None and sessao.meter_atual_wh > sessao.meter_inicio_wh:
         _carro_puxou_energia(db, sessao, "medidor subindo")
     return {}
+
+
+def _energia_possivel_wh(sessao: SessaoCarga) -> float:
+    """O maximo que um carregador AC (22 kW) entrega desde o inicio, com folga."""
+    segundos = (agora() - sessao.inicio).total_seconds() if sessao.inicio else 0
+    return max(0.0, segundos) / 3600 * 22000 + 500
 
 
 def _leituras(payload: dict) -> dict[str, float]:

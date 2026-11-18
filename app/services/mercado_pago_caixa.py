@@ -275,10 +275,19 @@ def registrar_pagamento(
         if db.query(Cobranca).filter(Cobranca.external_reference == referencia).first():
             db.rollback()
             return None  # webhook repetido (payment.created + payment.updated)
-        minutos = minutos_por_valor(carregador, valor)
+        from app.services import cobranca_kwh  # importa ocpp_handlers
+
+        kwh = cobranca_kwh.kwh_por_valor(carregador, valor) if cobranca_kwh.cobra_por_kwh(carregador) else None
+        if kwh is not None:
+            # Modo kWh: o valor vira energia; o tempo e' so o teto de seguranca.
+            minutos = cobranca_kwh.teto_minutos(carregador) if kwh >= 0.01 else 0
+        else:
+            minutos = minutos_por_valor(carregador, valor)
+        compra = f"{kwh:.2f} kWh" if kwh is not None else f"{minutos} min"
         cobranca = Cobranca(
             carregador_id=carregador.id_hardware,
             minutos=minutos,
+            kwh=kwh,
             valor=valor,
             origem=origem,
             external_reference=referencia,
@@ -290,14 +299,21 @@ def registrar_pagamento(
             db,
             carregador.id_hardware,
             "PAGAMENTO",
-            f"Pagamento na maquininha {payment_id}: {minutos} min ({metodo or origem})" + (f" - chegou {via}" if via else ""),
+            f"Pagamento na maquininha {payment_id}: {compra} ({metodo or origem})" + (f" - chegou {via}" if via else ""),
             valor=valor,
         )
         db.commit()
 
     ativa = sessoes.sessao_ativa(db, carregador.id_hardware)
-    if minutos < 1 or (ativa is not None and ativa.status != "carregando"):
-        motivo = "sem regra de preco (ou valor baixo demais)" if minutos < 1 else "carregador ocupado comecando outra recarga"
+    # Recarga em andamento com outro modo (o painel trocou de tempo para kWh no meio).
+    outro_modo = ativa is not None and (ativa.kwh_pagos is None) != (kwh is None)
+    if minutos < 1 or (ativa is not None and ativa.status != "carregando") or outro_modo:
+        if minutos < 1:
+            motivo = "sem regra de preco (ou valor baixo demais)"
+        elif outro_modo:
+            motivo = "a recarga em andamento e' de outro modo de cobranca (tempo/kWh)"
+        else:
+            motivo = "carregador ocupado comecando outra recarga"
         cobranca.status = "aprovada"
         cobranca.pago_em = agora()
         registrar_historico(db, carregador.id_hardware, "PAGAMENTO", f"ATENCAO: pagamento {payment_id} nao liberado: {motivo}; estornando")
@@ -306,13 +322,17 @@ def registrar_pagamento(
         return cobranca
 
     if ativa is not None:
-        # Pagou de novo com o carro carregando: soma o tempo.
+        # Pagou de novo com o carro carregando: soma o tempo (ou a energia).
         cobranca.status = "aprovada"
         cobranca.pago_em = agora()
-        ativa.minutos_pagos += minutos
-        if ativa.fim_previsto is not None:
-            ativa.fim_previsto += timedelta(minutes=minutos)
-        registrar_historico(db, carregador.id_hardware, "SESSAO", f"Sessao {ativa.id}: +{minutos} min (pagamento {payment_id})")
+        cobranca.sessao_id = ativa.id
+        if kwh is not None:
+            ativa.kwh_pagos = round(ativa.kwh_pagos + kwh, 3)
+        else:
+            ativa.minutos_pagos += minutos
+            if ativa.fim_previsto is not None:
+                ativa.fim_previsto += timedelta(minutes=minutos)
+        registrar_historico(db, carregador.id_hardware, "SESSAO", f"Sessao {ativa.id}: +{compra} (pagamento {payment_id})")
         db.commit()
         return cobranca
 

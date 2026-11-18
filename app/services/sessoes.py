@@ -15,7 +15,7 @@ from datetime import timedelta
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, SessaoCarga, agora
-from app.services import ocpp_server, pagamentos, trava
+from app.services import cobranca_kwh, ocpp_server, pagamentos, trava
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, registrar_historico
 
 START_RETRY_SECONDS = 10
@@ -59,6 +59,8 @@ def iniciar_sessao_para_cobranca(db, cobranca: Cobranca) -> SessaoCarga:
         connector_id=carregador.connector_id,
         id_tag="pendente",
         minutos_pagos=cobranca.minutos,
+        # Compra de energia: para nos kWh pagos (cobranca_kwh); minutos e' o teto.
+        kwh_pagos=cobranca.kwh,
         status="aguardando_inicio",
     )
     db.add(sessao)
@@ -256,6 +258,9 @@ def processar_sessoes_uma_vez() -> None:
                 sessao.carregador_id
             ):
                 encerrar_sessao(db, sessao)
+
+        # Recarga por kWh: para quem chegou na energia paga e devolve a sobra.
+        cobranca_kwh.processar(db)
 
         # Sem recarga paga, conector travado (nao carrega ao plugar).
         trava.verificar(db)

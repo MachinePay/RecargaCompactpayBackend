@@ -34,8 +34,19 @@ def _data_mp(momento) -> str:
     return momento.strftime("%Y-%m-%dT%H:%M:%S.000-00:00")
 
 
-def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id: str, motorista_id: int | None = None) -> Cobranca:
-    valor = valor_por_minutos(carregador, minutos)
+def criar_cobranca_pix(
+    db, carregador: Carregador, minutos: int, dispositivo_id: str, motorista_id: int | None = None, kwh: float | None = None
+) -> Cobranca:
+    """kwh preenchido = compra de energia (modo kWh); minutos vira o teto."""
+    from app.services import cobranca_kwh  # importa ocpp_handlers
+
+    if kwh is not None:
+        valor = cobranca_kwh.valor_por_kwh(carregador, kwh)
+        minutos = cobranca_kwh.teto_minutos(carregador)
+        compra = f"{kwh:g} kWh"
+    else:
+        valor = valor_por_minutos(carregador, minutos)
+        compra = f"{minutos} min"
     if valor < 1:
         raise HTTPException(status_code=422, detail="Este carregador ainda nao tem preco cadastrado")
     origem = "simulado" if settings.MP_SIMULADO else "pix"
@@ -43,6 +54,7 @@ def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id:
     cobranca = Cobranca(
         carregador_id=carregador.id_hardware,
         minutos=minutos,
+        kwh=kwh,
         valor=valor,
         origem=origem,
         metodo="pix",
@@ -61,7 +73,7 @@ def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id:
             token,
             body={
                 "transaction_amount": valor,
-                "description": f"Recarga {minutos} min - {carregador.nome_local}"[:200],
+                "description": f"Recarga {compra} - {carregador.nome_local}"[:200],
                 "payment_method_id": "pix",
                 "external_reference": cobranca.external_reference,
                 "date_of_expiration": _data_mp(max(expira_em, agora() + VENCIMENTO_MINIMO_MP)),
@@ -82,7 +94,7 @@ def criar_cobranca_pix(db, carregador: Carregador, minutos: int, dispositivo_id:
         db,
         carregador.id_hardware,
         "PAGAMENTO",
-        f"Pix de {minutos} min gerado pelo app do motorista ({origem}, payment={cobranca.mp_payment_id})",
+        f"Pix de {compra} gerado pelo app do motorista ({origem}, payment={cobranca.mp_payment_id})",
         valor=valor,
     )
     db.commit()

@@ -79,8 +79,10 @@ def parear_reader(api_key: str, merchant: str, codigo: str, nome: str | None = N
     return {"id": dados["id"], "nome": dados.get("name") or serial, "serial": serial, "status": dados.get("status")}
 
 
-def estornar(api_key: str, transaction_id: str) -> None:
-    su_request("POST", f"{API}/v0.1/me/refund/{urllib.parse.quote(transaction_id)}", api_key, body={})
+def estornar(api_key: str, transaction_id: str, valor: float | None = None) -> None:
+    """Sem valor: estorna tudo. Com valor: estorno parcial (sobra do modo kWh)."""
+    corpo = {"amount": round(valor, 2)} if valor is not None else {}
+    su_request("POST", f"{API}/v0.1/me/refund/{urllib.parse.quote(transaction_id)}", api_key, body=corpo)
 
 
 def _historico(api_key: str, merchant: str, desde: str | None) -> list[dict]:

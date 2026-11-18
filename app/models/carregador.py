@@ -125,6 +125,18 @@ class Carregador(Base):
     # proporcional (ex.: 10 = 20 min -> R$ 5 da 10 min, R$ 25 da 50 min).
     preco_valor = Column(Float, nullable=True)
     preco_minutos = Column(Integer, nullable=True)
+    # Como cobra: "tempo" (pacotes de minutos, o padrao) ou "kwh" (o motorista
+    # compra energia; o carregador para quando entrega os kWh pagos). Vazio = tempo.
+    modo_cobranca = Column(String, nullable=True)
+    # Modo kWh: preco de 1 kWh. A maquininha do caixa e o Pix convertem o valor
+    # pago em kWh por ele (R$ 2,00/kWh: R$ 30 = 15 kWh).
+    preco_kwh = Column(Float, nullable=True)
+    # Modo kWh: teto de tempo da recarga (o carro que puxa pouco nao fica na
+    # vaga para sempre). Vazio = KWH_TEMPO_MAXIMO_MINUTOS.
+    kwh_tempo_maximo_min = Column(Integer, nullable=True)
+    # Modo kWh: devolve sozinho o que o motorista pagou e nao usou (estorno
+    # parcial). Vazio = sim.
+    devolver_sobra = Column(Boolean, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     # Excluido pelo painel mas com vendas no historico: some das telas e recusa
     # a conexao, e as vendas antigas continuam nos relatorios.
@@ -161,6 +173,8 @@ class PacoteTempo(Base):
     nome = Column(String, nullable=False)
     minutos = Column(Integer, nullable=False)
     valor = Column(Float, nullable=False)
+    # Pacote de energia (modo kWh): kWh que o motorista leva; minutos fica 0.
+    kwh = Column(Float, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     ordem = Column(Integer, default=0, nullable=False)
 
@@ -207,6 +221,16 @@ class Cobranca(Base):
     pago_em = Column(DateTime, nullable=True)
     estornada_em = Column(DateTime, nullable=True)
     estorno_erro = Column(Text, nullable=True)
+    # Modo kWh: energia comprada (vazio = compra de tempo).
+    kwh = Column(Float, nullable=True)
+    # Pagamento somado a uma recarga que ja estava carregando (maquininha do
+    # caixa): a recarga dele. A recarga normal aponta para a cobranca.
+    sessao_id = Column(Integer, index=True, nullable=True)
+    # Acerto do modo kWh no fim da recarga: quanto foi usado e quanto voltou
+    # para o motorista (estorno parcial). estornada_em continua sendo so o
+    # estorno do valor inteiro.
+    valor_consumido = Column(Float, nullable=True)
+    valor_devolvido = Column(Float, nullable=True)
 
 
 class SessaoCarga(Base):
@@ -229,6 +253,8 @@ class SessaoCarga(Base):
     __table_args__ = (
         Index("ix_sessoes_carregador_id_desc", "carregador_id", "id"),
         Index("ix_sessoes_created_at", "created_at"),
+        # Worker: recargas por kWh terminadas que ainda nao tiveram o acerto.
+        Index("ix_sessoes_acerto_kwh", "status", "acerto_em", "kwh_pagos"),
     )
     id = Column(Integer, primary_key=True)
     carregador_id = Column(String, ForeignKey("carregadores.id_hardware"), index=True, nullable=False)
@@ -256,6 +282,13 @@ class SessaoCarga(Base):
     meter_inicio_wh = Column(Integer, nullable=True)
     meter_atual_wh = Column(Integer, nullable=True)
     meter_fim_wh = Column(Integer, nullable=True)
+    # Modo kWh: energia paga (soma dos pagamentos). Vazio = recarga por tempo.
+    # minutos_pagos vira o teto de seguranca.
+    kwh_pagos = Column(Float, nullable=True)
+    # Quando o acerto do modo kWh rodou (devolucao da sobra), e o erro se o
+    # banco recusou (ai o painel mostra para devolver na mao).
+    acerto_em = Column(DateTime, nullable=True)
+    acerto_erro = Column(Text, nullable=True)
 
 
 class HistoricoOperacao(Base):

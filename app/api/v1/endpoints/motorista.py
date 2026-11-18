@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, Motorista, SessaoCarga, agora
-from app.services import auth, ocpp_server, pagamentos, pix, sessoes
+from app.services import auth, cobranca_kwh, ocpp_server, pagamentos, pix, sessoes
 from app.services.ocpp_handlers import energia_kwh
 
 router = APIRouter(prefix="/publico", tags=["motorista"])
@@ -39,6 +39,8 @@ STATUS_COM_CARRO = ("Charging", "SuspendedEV", "SuspendedEVSE", "Finishing")
 DISPOSITIVO_VALIDO = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 # Botoes prontos na tela de escolher o tempo (filtrados pela faixa permitida).
 SUGESTOES_MINUTOS = (15, 30, 60, 90, 120, 180)
+# Mesmo, para carregador que cobra por kWh.
+SUGESTOES_KWH = (5, 10, 20, 30, 40, 60)
 
 
 def get_db():
@@ -96,7 +98,10 @@ def _situacao(db: Session, carregador: Carregador) -> dict:
         situacao = "defeito"
     elif ativa is not None or carregador.status_conector in STATUS_COM_CARRO:
         situacao = "ocupado"
-        if ativa is not None and ativa.status == "carregando":
+        if ativa is not None and ativa.kwh_pagos is not None:
+            # Por kWh nao ha hora certa: estima pela potencia que o carro puxa agora.
+            segundos = _estimativa_kwh(carregador, ativa)
+        elif ativa is not None and ativa.status == "carregando":
             segundos = sessoes.segundos_restantes(ativa)
             if segundos is None:
                 # O tempo pago so conta quando o carro puxa energia.
@@ -118,8 +123,20 @@ def _situacao(db: Session, carregador: Carregador) -> dict:
     }
 
 
+def _estimativa_kwh(carregador: Carregador, sessao: SessaoCarga) -> int | None:
+    restantes = cobranca_kwh.kwh_restantes(sessao) or 0
+    potencia = carregador.medido_potencia_w or 0
+    if sessao.status == "encerrando":
+        return 0
+    if potencia < 500 or restantes <= 0:
+        return None
+    return int(restantes * 1000 / potencia * 3600)
+
+
 def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
-    preco_hora = pix.valor_por_minutos(carregador, 60) or None
+    por_kwh = cobranca_kwh.cobra_por_kwh(carregador)
+    preco_hora = None if por_kwh else (pix.valor_por_minutos(carregador, 60) or None)
+    tem_preco = bool(carregador.preco_kwh) if por_kwh else bool(preco_hora)
     return {
         "id": carregador.id_hardware,
         "nome": carregador.nome_local,
@@ -129,8 +146,10 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
         "preco_valor": carregador.preco_valor,
         "preco_minutos": carregador.preco_minutos,
         "preco_hora": preco_hora,
+        "modo_cobranca": "kwh" if por_kwh else "tempo",
+        "preco_kwh": carregador.preco_kwh if por_kwh else None,
         "corrente_maxima_a": carregador.corrente_maxima_a,
-        "aceita_pix": bool(preco_hora) and (settings.MP_SIMULADO or bool(pagamentos.token_do_carregador(carregador))),
+        "aceita_pix": tem_preco and (settings.MP_SIMULADO or bool(pagamentos.token_do_carregador(carregador))),
         **_situacao(db, carregador),
     }
 
@@ -155,6 +174,18 @@ def listar_carregadores(db: Session = Depends(get_db)):
 @router.get("/carregadores/{carregador_id}")
 def obter_carregador(carregador_id: str, db: Session = Depends(get_db)):
     carregador = _obter(db, carregador_id)
+    if cobranca_kwh.cobra_por_kwh(carregador):
+        minimo, maximo = settings.RECARGA_MIN_KWH, settings.RECARGA_MAX_KWH
+        return {
+            **_serializar_carregador(db, carregador),
+            "kwh_min": minimo,
+            "kwh_max": maximo,
+            "opcoes": [
+                {"kwh": k, "valor": cobranca_kwh.valor_por_kwh(carregador, k)}
+                for k in SUGESTOES_KWH
+                if minimo <= k <= maximo
+            ],
+        }
     minimo, maximo = settings.RECARGA_MIN_MINUTOS, settings.RECARGA_MAX_MINUTOS
     return {
         **_serializar_carregador(db, carregador),
@@ -170,7 +201,9 @@ def obter_carregador(carregador_id: str, db: Session = Depends(get_db)):
 
 class PixCreate(BaseModel):
     carregador_id: str
-    minutos: int
+    # Um ou outro, conforme o modo de cobranca do carregador.
+    minutos: int | None = None
+    kwh: float | None = None
     dispositivo: str
 
 
@@ -185,7 +218,10 @@ def _serializar_cobranca(db: Session, cobranca: Cobranca) -> dict:
         "longitude": carregador.longitude if carregador else None,
         "status": cobranca.status,
         "minutos": cobranca.minutos,
+        "kwh": cobranca.kwh,
         "valor": cobranca.valor,
+        "valor_consumido": cobranca.valor_consumido,
+        "valor_devolvido": cobranca.valor_devolvido,
         "simulado": cobranca.origem == "simulado",
         "pix_copia_cola": cobranca.pix_copia_cola if cobranca.status == "aguardando_pagamento" else None,
         "segundos_para_vencer": (
@@ -205,6 +241,8 @@ def _serializar_sessao(sessao: SessaoCarga) -> dict:
         "id": sessao.id,
         "status": sessao.status,
         "minutos_pagos": sessao.minutos_pagos,
+        "kwh_pagos": sessao.kwh_pagos,
+        "kwh_restantes": cobranca_kwh.kwh_restantes(sessao),
         "inicio": sessao.inicio,
         "energia_desde": sessao.energia_desde,
         "fim_previsto": sessao.fim_previsto,
@@ -227,7 +265,14 @@ def _cobranca_do_dispositivo(db: Session, cobranca_id: int, dispositivo: str, mo
 def gerar_pix(dados: PixCreate, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
     dispositivo = _dispositivo(dados.dispositivo)
     carregador = _obter(db, dados.carregador_id)
-    if not settings.RECARGA_MIN_MINUTOS <= dados.minutos <= settings.RECARGA_MAX_MINUTOS:
+    por_kwh = cobranca_kwh.cobra_por_kwh(carregador)
+    if por_kwh:
+        if dados.kwh is None or not settings.RECARGA_MIN_KWH <= dados.kwh <= settings.RECARGA_MAX_KWH:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Escolha entre {settings.RECARGA_MIN_KWH:g} e {settings.RECARGA_MAX_KWH:g} kWh",
+            )
+    elif dados.minutos is None or not settings.RECARGA_MIN_MINUTOS <= dados.minutos <= settings.RECARGA_MAX_MINUTOS:
         raise HTTPException(
             status_code=422,
             detail=f"Escolha entre {settings.RECARGA_MIN_MINUTOS} e {settings.RECARGA_MAX_MINUTOS} minutos",
@@ -249,7 +294,14 @@ def gerar_pix(dados: PixCreate, db: Session = Depends(get_db), motorista: Motori
             "ocupado": "O carregador esta em uso",
         }
         raise HTTPException(status_code=409, detail=mensagens.get(situacao, "Carregador indisponivel"))
-    cobranca = pix.criar_cobranca_pix(db, carregador, dados.minutos, dispositivo, motorista.id if motorista else None)
+    cobranca = pix.criar_cobranca_pix(
+        db,
+        carregador,
+        dados.minutos or 0,
+        dispositivo,
+        motorista.id if motorista else None,
+        kwh=round(dados.kwh, 2) if por_kwh else None,
+    )
     return _serializar_cobranca(db, cobranca)
 
 
@@ -305,7 +357,8 @@ def historico(dispositivo: str = Query(...), db: Session = Depends(get_db), moto
     return {
         "totais": {
             "recargas": len(validas),
-            "valor": round(sum(i["valor"] for i in validas), 2),
+            # Por kWh, o que voltou para o motorista nao conta como gasto.
+            "valor": round(sum(i["valor"] - (i["valor_devolvido"] or 0) for i in validas), 2),
             "kwh": round(sum((i["sessao"] or {}).get("energia_kwh") or 0 for i in validas), 3),
             "minutos": sum(i["minutos"] for i in validas),
             "carregadores": len({i["carregador_id"] for i in validas}),

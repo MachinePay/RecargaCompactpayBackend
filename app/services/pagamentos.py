@@ -96,10 +96,16 @@ def _usa_mercado_pago(cobranca: Cobranca) -> bool:
 def criar_cobranca(db, carregador: Carregador, pacote: PacoteTempo, origem: str = "point") -> Cobranca:
     if origem == "point" and settings.MP_SIMULADO:
         origem = "simulado"
+    from app.services import cobranca_kwh  # importa ocpp_handlers, como este modulo
+
+    kwh = pacote.kwh if pacote.kwh else None
+    minutos = cobranca_kwh.teto_minutos(carregador) if kwh else pacote.minutos
+    compra = f"{kwh:g} kWh" if kwh else f"{pacote.minutos} min"
     cobranca = Cobranca(
         carregador_id=carregador.id_hardware,
         pacote_id=pacote.id if pacote else None,
-        minutos=pacote.minutos,
+        minutos=minutos,
+        kwh=kwh,
         valor=pacote.valor,
         origem=origem,
         external_reference=f"EV:{carregador.id_hardware}:{uuid4().hex[:12]}",
@@ -117,7 +123,7 @@ def criar_cobranca(db, carregador: Carregador, pacote: PacoteTempo, origem: str 
             body={
                 "type": "point",
                 "external_reference": cobranca.external_reference,
-                "description": f"Recarga {pacote.minutos} min - {carregador.nome_local}",
+                "description": f"Recarga {compra} - {carregador.nome_local}",
                 "transactions": {"payments": [{"amount": f"{pacote.valor:.2f}"}]},
                 "config": {"point": {"terminal_id": carregador.mp_terminal_id, "print_on_terminal": "no_ticket"}},
             },
@@ -129,7 +135,7 @@ def criar_cobranca(db, carregador: Carregador, pacote: PacoteTempo, origem: str 
         db,
         carregador.id_hardware,
         "PAGAMENTO",
-        f"Cobranca de {pacote.minutos} min criada ({origem}, order={cobranca.mp_order_id})",
+        f"Cobranca de {compra} criada ({origem}, order={cobranca.mp_order_id})",
         valor=pacote.valor,
     )
     db.commit()
@@ -264,56 +270,100 @@ def cancelar_cobranca(db, cobranca: Cobranca) -> bool:
     return True
 
 
-def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
-    if cobranca is None or cobranca.estornada_em or cobranca.status != "aprovada" or cobranca.valor <= 0:
-        return False
-    if cobranca.origem == "sumup":
-        from app.services import sumup  # import local: sumup importa mercado_pago_caixa
+def _reembolsar(db, cobranca: Cobranca, valor: float | None, chave: str) -> str | None:
+    """Devolve no banco do pagamento. valor None = tudo. Devolve o erro (ou
+    None se deu certo). A chave de idempotencia faz a repeticao nao devolver
+    duas vezes."""
+    carregador = db.get(Carregador, cobranca.carregador_id)
+    try:
+        if cobranca.origem == "sumup":
+            from app.services import sumup  # import local: sumup importa mercado_pago_caixa
 
-        carregador = db.get(Carregador, cobranca.carregador_id)
-        cliente = carregador.cliente if carregador else None
-        try:
-            sumup.estornar((cliente.sumup_api_key if cliente else "") or "", cobranca.mp_payment_id)
-        except Exception as exc:
-            cobranca.estorno_erro = str(exc)[:500]
-            registrar_historico(
-                db,
-                cobranca.carregador_id,
-                "PAGAMENTO",
-                f"ESTORNO FALHOU na cobranca {cobranca.id} (SumUp {cobranca.mp_payment_id}) - estornar manualmente no app da SumUp",
-                valor=cobranca.valor,
-            )
-            db.commit()
-            return False
-    elif _usa_mercado_pago(cobranca) or cobranca.origem in ("caixa", "pix"):
-        carregador = db.get(Carregador, cobranca.carregador_id)
-        # Venda do tablet estorna a order; pagamento direto na maquininha do
-        # caixa e Pix do app do motorista estornam o payment.
-        url = (
-            f"{MP_API}/v1/orders/{cobranca.mp_order_id}/refund"
-            if _usa_mercado_pago(cobranca)
-            else f"{MP_API}/v1/payments/{cobranca.mp_payment_id}/refunds"
-        )
-        try:
+            cliente = carregador.cliente if carregador else None
+            sumup.estornar((cliente.sumup_api_key if cliente else "") or "", cobranca.mp_payment_id, valor)
+        elif _usa_mercado_pago(cobranca):
+            # Venda do tablet: estorna a order. Parcial vai com o id da
+            # transacao de pagamento da order e o valor.
+            corpo = {"transactions": [{"id": cobranca.mp_payment_id, "amount": f"{valor:.2f}"}]} if valor is not None else None
             mp_request(
                 "POST",
-                url,
+                f"{MP_API}/v1/orders/{cobranca.mp_order_id}/refund",
                 token_do_carregador(carregador),
-                headers={"X-Idempotency-Key": f"refund-{cobranca.external_reference}"},
+                body=corpo,
+                headers={"X-Idempotency-Key": chave},
             )
-        except Exception as exc:
-            cobranca.estorno_erro = str(exc)[:500]
-            registrar_historico(
-                db,
-                cobranca.carregador_id,
-                "PAGAMENTO",
-                f"ESTORNO FALHOU na cobranca {cobranca.id} (order {cobranca.mp_order_id}) - estornar manualmente no Mercado Pago",
-                valor=cobranca.valor,
+        elif cobranca.origem in ("caixa", "pix"):
+            # Maquininha do caixa e Pix do app: estorna o payment.
+            mp_request(
+                "POST",
+                f"{MP_API}/v1/payments/{cobranca.mp_payment_id}/refunds",
+                token_do_carregador(carregador),
+                body={"amount": round(valor, 2)} if valor is not None else None,
+                headers={"X-Idempotency-Key": chave},
             )
-            db.commit()
-            return False
+        # simulado/teste/voucher: nao ha banco para chamar.
+    except Exception as exc:
+        return str(getattr(exc, "detail", None) or exc)[:500]
+    return None
+
+
+def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
+    """Estorna o valor inteiro (ou o que ainda nao foi devolvido)."""
+    if cobranca is None or cobranca.estornada_em or cobranca.status != "aprovada" or cobranca.valor <= 0:
+        return False
+    ja_devolvido = cobranca.valor_devolvido or 0
+    if ja_devolvido > 0:
+        # Ja teve devolucao parcial (sobra do kWh): devolve so o resto.
+        resto = round(cobranca.valor - ja_devolvido, 2)
+        erro = _reembolsar(db, cobranca, resto, f"refund-resto-{cobranca.external_reference}") if resto > 0 else None
+    else:
+        erro = _reembolsar(db, cobranca, None, f"refund-{cobranca.external_reference}")
+    if erro:
+        cobranca.estorno_erro = erro
+        banco = "no app da SumUp" if cobranca.origem == "sumup" else "no Mercado Pago"
+        registrar_historico(
+            db,
+            cobranca.carregador_id,
+            "PAGAMENTO",
+            f"ESTORNO FALHOU na cobranca {cobranca.id} ({cobranca.mp_order_id or cobranca.mp_payment_id}) - estornar manualmente {banco}",
+            valor=cobranca.valor,
+        )
+        db.commit()
+        return False
     cobranca.estornada_em = agora()
+    cobranca.estorno_erro = None
     registrar_historico(db, cobranca.carregador_id, "PAGAMENTO", f"Cobranca {cobranca.id} estornada", valor=cobranca.valor)
+    db.commit()
+    return True
+
+
+def devolver_parte(db, cobranca: Cobranca, valor: float) -> bool:
+    """Estorno parcial: a sobra de uma recarga por kWh. So uma vez por cobranca."""
+    valor = round(valor, 2)
+    if cobranca.status != "aprovada" or cobranca.estornada_em or cobranca.valor_devolvido or valor <= 0:
+        return False
+    if valor >= cobranca.valor - 0.009:
+        # Nao usou nada: estorno inteiro (parcial do valor todo o MP recusa).
+        if estornar_cobranca(db, cobranca):
+            cobranca.valor_devolvido = cobranca.valor
+            db.commit()
+            return True
+        return False
+    erro = _reembolsar(db, cobranca, valor, f"devolve-{cobranca.external_reference}")
+    if erro:
+        cobranca.estorno_erro = erro
+        registrar_historico(
+            db,
+            cobranca.carregador_id,
+            "PAGAMENTO",
+            f"DEVOLUCAO FALHOU: R$ {valor:.2f} da cobranca {cobranca.id} - devolver pelo painel ou no banco",
+            valor=valor,
+        )
+        db.commit()
+        return False
+    cobranca.valor_devolvido = valor
+    cobranca.estorno_erro = None
+    registrar_historico(db, cobranca.carregador_id, "PAGAMENTO", f"Sobra devolvida ao motorista (cobranca {cobranca.id})", valor=valor)
     db.commit()
     return True
 
