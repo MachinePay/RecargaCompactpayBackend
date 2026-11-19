@@ -98,7 +98,9 @@ def criar_cobranca(db, carregador: Carregador, pacote: PacoteTempo, origem: str 
         origem = "simulado"
     from app.services import cobranca_kwh  # importa ocpp_handlers, como este modulo
 
-    kwh = pacote.kwh if pacote.kwh else None
+    # Pacote de energia: entrega o percentual (margem) e cobra o usado pelo
+    # preco do pacote.
+    kwh = cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh) if pacote.kwh else None
     minutos = cobranca_kwh.teto_minutos(carregador) if kwh else pacote.minutos
     compra = f"{kwh:g} kWh" if kwh else f"{pacote.minutos} min"
     cobranca = Cobranca(
@@ -106,6 +108,8 @@ def criar_cobranca(db, carregador: Carregador, pacote: PacoteTempo, origem: str 
         pacote_id=pacote.id if pacote else None,
         minutos=minutos,
         kwh=kwh,
+        # Pacote tem o proprio preco (pode ter desconto): R$/kWh do pacote.
+        preco_kwh=round(pacote.valor / pacote.kwh, 4) if kwh else None,
         valor=pacote.valor,
         origem=origem,
         external_reference=f"EV:{carregador.id_hardware}:{uuid4().hex[:12]}",

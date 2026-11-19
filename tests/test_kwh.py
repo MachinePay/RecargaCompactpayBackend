@@ -121,10 +121,51 @@ def test_sem_leitura_do_medidor_nao_devolve_e_avisa(client):
 
 
 def test_acerto_desconta_do_primeiro_pagamento_e_depois_do_segundo():
-    primeiro = Cobranca(id=1, status="aprovada", valor=20, kwh=10)
-    segundo = Cobranca(id=2, status="aprovada", valor=10, kwh=5)
+    primeiro = Cobranca(id=1, status="aprovada", valor=20, kwh=10, preco_kwh=2)
+    segundo = Cobranca(id=2, status="aprovada", valor=10, kwh=5, preco_kwh=2)
     acerto = cobranca_kwh.calcular_acerto([primeiro, segundo], 12.5)
     assert [(c.id, consumido, sobra) for c, consumido, sobra in acerto] == [(1, 20, 0), (2, 5.0, 5.0)]
+
+
+def test_maquininha_com_margem_entrega_80_por_cento_e_cobra_pelo_preco(client):
+    _carregador_kwh(client, "CP-KWH6")
+    r = client.patch("/api/v1/admin/carregadores/CP-KWH6", json={"kwh_percentual_entrega": 80}, headers=ADMIN)
+    assert r.json()["kwh_percentual_entrega"] == 80
+    with client.websocket_connect("/ocpp/CP-KWH6", subprotocols=["ocpp1.6"]) as ws:
+        cp = CarregadorFake(ws)
+        cp.ligar()
+        # R$ 10 a R$ 2,00/kWh: 5 kWh pagos, para em 4 kWh (80%).
+        simulado = client.post("/api/v1/admin/carregadores/CP-KWH6/simular-pagamento", json={"valor": 10}, headers=ADMIN).json()
+        assert simulado["kwh"] == 4.0
+        start = cp.receber_chamada("RemoteStartTransaction")
+        cp.responder(start, {"status": "Accepted"})
+        sessao_id = int(start[3]["idTag"][2:])
+        cp.chamar("StartTransaction", {"connectorId": 1, "idTag": start[3]["idTag"], "meterStart": 1000, "timestamp": "2026-11-19T12:00:00Z"})
+        _medir(cp, sessao_id, 4980)
+        sessoes.processar_sessoes_uma_vez()
+        stop = cp.receber_chamada("RemoteStopTransaction")
+        cp.responder(stop, {"status": "Accepted"})
+        # Passou do ponto: 4,1 kWh. Sai da margem, cobrado a R$ 2,00/kWh.
+        cp.chamar("StopTransaction", {"transactionId": sessao_id, "meterStop": 5100, "timestamp": "2026-11-19T13:00:00Z", "reason": "Remote"})
+        sessoes.processar_sessoes_uma_vez()
+
+    cobranca = _cobranca_da_sessao(sessao_id)
+    assert cobranca.valor_consumido == 8.2
+    assert cobranca.valor_devolvido == 1.8
+
+    # App: 10 kWh a R$ 2,00 com 80% = Pix de R$ 25 (R$ 20 de energia + margem).
+    info = client.get("/api/v1/publico/carregadores/CP-KWH6").json()
+    assert {"kwh": 10, "valor": 25.0} in info["opcoes"] and info["percentual_entrega"] == 80
+    # Tablet: pacote de 10 kWh por R$ 20 para em 8 kWh, cobrado a R$ 2,00.
+    db = SessionLocal()
+    try:
+        from app.models.carregador import Carregador, PacoteTempo
+
+        carregador = db.get(Carregador, "CP-KWH6")
+        pacote = PacoteTempo(carregador_id="CP-KWH6", nome="10 kWh", minutos=0, kwh=10, valor=20)
+        assert cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh) == 8.0
+    finally:
+        db.close()
 
 
 def test_devolucao_parcial_manda_o_valor_ao_mercado_pago(client, monkeypatch):
@@ -171,3 +212,17 @@ def test_app_do_motorista_compra_kwh_no_pix(client):
         r = client.post("/api/v1/publico/pix", json={"carregador_id": "CP-KWH5", "kwh": 15, "dispositivo": "celular-kwh-1"})
         assert r.status_code == 200, r.text
         assert r.json()["kwh"] == 15 and r.json()["valor"] == 30.0
+
+
+def test_previsao_de_termino_pela_potencia():
+    from datetime import timedelta
+
+    from app.models.carregador import Carregador, agora
+
+    carregador = Carregador(id_hardware="CP-PREV", medido_potencia_w=7000, medido_em=agora())
+    sessao = SessaoCarga(status="carregando", kwh_pagos=10, meter_inicio_wh=0, meter_atual_wh=3000, fim_previsto=agora() + timedelta(hours=8))
+    # Faltam 7 kWh a 7 kW: cerca de 1 hora.
+    assert 3590 <= cobranca_kwh.previsao_segundos(None, carregador, sessao) <= 3600
+    # Nunca passa do tempo maximo.
+    sessao.fim_previsto = agora() + timedelta(minutes=30)
+    assert cobranca_kwh.previsao_segundos(None, carregador, sessao) <= 1800

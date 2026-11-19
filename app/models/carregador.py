@@ -137,6 +137,11 @@ class Carregador(Base):
     # Modo kWh: devolve sozinho o que o motorista pagou e nao usou (estorno
     # parcial). Vazio = sim.
     devolver_sobra = Column(Boolean, nullable=True)
+    # Modo kWh, todas as vendas: % do valor pago que vira energia. O resto
+    # e' margem para o carro puxar um pouco alem do ponto; no fim cobra o
+    # usado e devolve a sobra. Ex.: 80 -> R$ 10 a R$ 2/kWh para em 4 kWh; no
+    # app, 10 kWh viram um Pix de R$ 25. Vazio = 100.
+    kwh_percentual_entrega = Column(Integer, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     # Excluido pelo painel mas com vendas no historico: some das telas e recusa
     # a conexao, e as vendas antigas continuam nos relatorios.
@@ -221,8 +226,10 @@ class Cobranca(Base):
     pago_em = Column(DateTime, nullable=True)
     estornada_em = Column(DateTime, nullable=True)
     estorno_erro = Column(Text, nullable=True)
-    # Modo kWh: energia comprada (vazio = compra de tempo).
+    # Modo kWh: energia que a recarga entrega (vazio = compra de tempo) e o
+    # preco do kWh na hora da venda (o acerto cobra o usado por ele).
     kwh = Column(Float, nullable=True)
+    preco_kwh = Column(Float, nullable=True)
     # Pagamento somado a uma recarga que ja estava carregando (maquininha do
     # caixa): a recarga dele. A recarga normal aponta para a cobranca.
     sessao_id = Column(Integer, index=True, nullable=True)

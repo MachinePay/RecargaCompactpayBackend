@@ -55,6 +55,7 @@ def criar_cobranca_pix(
         carregador_id=carregador.id_hardware,
         minutos=minutos,
         kwh=kwh,
+        preco_kwh=carregador.preco_kwh if kwh is not None else None,
         valor=valor,
         origem=origem,
         metodo="pix",

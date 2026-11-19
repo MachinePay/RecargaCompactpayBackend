@@ -99,8 +99,8 @@ def _situacao(db: Session, carregador: Carregador) -> dict:
     elif ativa is not None or carregador.status_conector in STATUS_COM_CARRO:
         situacao = "ocupado"
         if ativa is not None and ativa.kwh_pagos is not None:
-            # Por kWh nao ha hora certa: estima pela potencia que o carro puxa agora.
-            segundos = _estimativa_kwh(carregador, ativa)
+            # Por kWh nao ha hora certa: estima pela potencia (agora ou media).
+            segundos = cobranca_kwh.previsao_segundos(db, carregador, ativa)
         elif ativa is not None and ativa.status == "carregando":
             segundos = sessoes.segundos_restantes(ativa)
             if segundos is None:
@@ -123,16 +123,6 @@ def _situacao(db: Session, carregador: Carregador) -> dict:
     }
 
 
-def _estimativa_kwh(carregador: Carregador, sessao: SessaoCarga) -> int | None:
-    restantes = cobranca_kwh.kwh_restantes(sessao) or 0
-    potencia = carregador.medido_potencia_w or 0
-    if sessao.status == "encerrando":
-        return 0
-    if potencia < 500 or restantes <= 0:
-        return None
-    return int(restantes * 1000 / potencia * 3600)
-
-
 def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
     por_kwh = cobranca_kwh.cobra_por_kwh(carregador)
     preco_hora = None if por_kwh else (pix.valor_por_minutos(carregador, 60) or None)
@@ -148,7 +138,11 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
         "preco_hora": preco_hora,
         "modo_cobranca": "kwh" if por_kwh else "tempo",
         "preco_kwh": carregador.preco_kwh if por_kwh else None,
+        # Margem: o Pix leva um pouco a mais e o que nao usar volta.
+        "percentual_entrega": cobranca_kwh.percentual_entrega(carregador) if por_kwh else None,
         "corrente_maxima_a": carregador.corrente_maxima_a,
+        # Media das ultimas recargas: o app preve tempo (kWh) ou energia (tempo).
+        "potencia_media_kw": cobranca_kwh.potencia_media_kw(db, carregador),
         "aceita_pix": tem_preco and (settings.MP_SIMULADO or bool(pagamentos.token_do_carregador(carregador))),
         **_situacao(db, carregador),
     }
@@ -232,12 +226,15 @@ def _serializar_cobranca(db: Session, cobranca: Cobranca) -> dict:
         "criada_em": cobranca.created_at,
         "pago_em": cobranca.pago_em,
         "estornada": cobranca.estornada_em is not None,
-        "sessao": _serializar_sessao(sessao) if sessao else None,
+        "sessao": _serializar_sessao(sessao, db, carregador) if sessao else None,
     }
 
 
-def _serializar_sessao(sessao: SessaoCarga) -> dict:
+def _serializar_sessao(sessao: SessaoCarga, db: Session | None = None, carregador: Carregador | None = None) -> dict:
+    previsao = cobranca_kwh.previsao_segundos(db, carregador, sessao) if db is not None and carregador is not None else None
     return {
+        # Quanto falta (aproximado). Por tempo e' o relogio; por kWh, pela potencia.
+        "segundos_previstos": previsao,
         "id": sessao.id,
         "status": sessao.status,
         "minutos_pagos": sessao.minutos_pagos,

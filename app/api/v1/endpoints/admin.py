@@ -128,6 +128,7 @@ class CarregadorUpdate(BaseModel):
     preco_kwh: float | None = Field(default=None, gt=0, le=50)
     kwh_tempo_maximo_min: int | None = Field(default=None, ge=10, le=24 * 60)
     devolver_sobra: bool | None = None
+    kwh_percentual_entrega: int | None = Field(default=None, ge=50, le=100)
 
 
 class ClienteDados(BaseModel):
@@ -300,6 +301,7 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "kwh_tempo_maximo_min": carregador.kwh_tempo_maximo_min,
         "kwh_tempo_maximo_padrao": settings.KWH_TEMPO_MAXIMO_MINUTOS,
         "devolver_sobra": carregador.devolver_sobra is not False,
+        "kwh_percentual_entrega": carregador.kwh_percentual_entrega,
         "mp_store_id": carregador.mp_store_id,
         "mp_store_external_id": carregador.mp_store_external_id,
         "mp_pos_id": carregador.mp_pos_id,
@@ -345,7 +347,7 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         carregador = existente
         for campo in ("mp_user_id", "mp_store_id", "mp_store_external_id", "mp_pos_id", "mp_pos_external_id",
                       "preco_valor", "preco_minutos", "modo_cobranca", "preco_kwh",
-                      "kwh_tempo_maximo_min", "devolver_sobra", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
+                      "kwh_tempo_maximo_min", "devolver_sobra", "kwh_percentual_entrega", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
             setattr(carregador, campo, None)
         for campo, valor in campos.items():
             setattr(carregador, campo, valor)
@@ -413,6 +415,8 @@ def _completar_carregadores(db: Session, lista: list[Carregador]) -> list[dict]:
         item.update(hoje.get(carregador.id_hardware) or _indicadores_vazios())
         ativa = ativas.get(carregador.id_hardware)
         item["sessao_ativa"] = serializar_sessao(ativa) if ativa else None
+        if ativa is not None:
+            item["sessao_ativa"]["segundos_previstos"] = cobranca_kwh.previsao_segundos(db, carregador, ativa)
         resposta.append(item)
     return resposta
 
@@ -548,6 +552,9 @@ def obter_carregador(carregador_id: str, db: Session = Depends(get_db), acesso: 
     item.update(_indicadores_hoje(db).get(carregador_id) or _indicadores_vazios())
     ativa = sessoes.sessao_ativa(db, carregador_id)
     item["sessao_ativa"] = serializar_sessao(ativa) if ativa else None
+    if ativa is not None:
+        item["sessao_ativa"]["segundos_previstos"] = cobranca_kwh.previsao_segundos(db, carregador, ativa)
+    item["potencia_media_kw"] = cobranca_kwh.potencia_media_kw(db, carregador)
     return item
 
 
