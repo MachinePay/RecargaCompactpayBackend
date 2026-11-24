@@ -17,10 +17,10 @@ celular passam para ela.
 6. POST /publico/conta | /publico/entrar        -> cria a conta / entra (devolve o token)
 7. GET  /publico/eu                             -> confere o login
 
-Carregador por kWh (com carteira, precisa de conta):
-8. POST /publico/recarga/previa                -> a conta: energia, reserva, saldo usado, a pagar
-9. POST /publico/recarga                       -> paga (saldo, Pix ou cartao) e libera
-10. GET /publico/carteira                       -> saldo e extrato
+Carregador por kWh (conta opcional; a sobra volta no mesmo Pix/cartao):
+8. POST /publico/recarga/previa                -> a conta: energia, reserva, total a pagar
+9. POST /publico/recarga                       -> paga (Pix ou cartao) e libera
+10. GET /publico/carteira                       -> saldo antigo da carteira (desativada)
 """
 import re
 import threading
@@ -139,6 +139,7 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
     tem_preco = bool(carregador.preco_kwh) if por_kwh else bool(preco_hora)
     return {
         "id": carregador.id_hardware,
+        "numero": carregador.numero,
         "nome": carregador.nome_local,
         "endereco": carregador.endereco,
         "latitude": carregador.latitude,
@@ -154,9 +155,9 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
         # Media das ultimas recargas: o app preve tempo (kWh) ou energia (tempo).
         "potencia_media_kw": cobranca_kwh.potencia_media_kw(db, carregador),
         "aceita_pix": tem_preco and (settings.MP_SIMULADO or bool(pagamentos.token_do_carregador(carregador))),
-        # Por kWh: so com conta (a sobra volta para a carteira) e aceita cartao
-        # se o cliente dono tem a Public Key do MP (o app gera o token do cartao).
-        "precisa_conta": por_kwh,
+        # Aceita cartao se o cliente dono tem a Public Key do MP (o app gera o
+        # token do cartao). Conta no app e' opcional.
+        "precisa_conta": False,
         "aceita_cartao": por_kwh and tem_preco and (settings.MP_SIMULADO or bool(_public_key(carregador))),
         "mp_public_key": _public_key(carregador) if por_kwh else None,
         **_situacao(db, carregador),
@@ -178,6 +179,19 @@ def listar_carregadores(db: Session = Depends(get_db)):
         .all()
     )
     return [_serializar_carregador(db, c) for c in carregadores]
+
+
+@router.get("/carregadores/numero/{numero}")
+def carregador_pelo_numero(numero: int, db: Session = Depends(get_db)):
+    """O motorista digita o numero do adesivo (quando nao sabe o nome)."""
+    carregador = (
+        db.query(Carregador)
+        .filter(Carregador.numero == numero, Carregador.ativo.is_(True), Carregador.excluido_em.is_(None))
+        .first()
+    )
+    if carregador is None:
+        raise HTTPException(status_code=404, detail=f"Nenhum carregador com o numero {numero}")
+    return {"id": carregador.id_hardware, "numero": carregador.numero, "nome": carregador.nome_local}
 
 
 @router.get("/carregadores/{carregador_id}")
@@ -306,8 +320,6 @@ def gerar_pix(dados: PixCreate, db: Session = Depends(get_db), motorista: Motori
             detail=f"Escolha entre {settings.RECARGA_MIN_MINUTOS} e {settings.RECARGA_MAX_MINUTOS} minutos",
         )
     if por_kwh:
-        if motorista is None:
-            raise HTTPException(status_code=401, detail="Entre na sua conta para recarregar neste carregador")
         _checar_livre(db, carregador, dispositivo)
         cobranca = recarga_app.criar(db, carregador, motorista, round(dados.kwh, 2), "pix", dispositivo)
         return _serializar_cobranca(db, cobranca)
@@ -347,7 +359,7 @@ class Previa(BaseModel):
 class RecargaCreate(BaseModel):
     carregador_id: str
     kwh: float
-    metodo: str  # saldo | pix | cartao
+    metodo: str  # pix | cartao
     dispositivo: str
     # O "a pagar" que o motorista viu: se o saldo mudou no meio, nao cobra outro valor.
     a_pagar: float | None = None
@@ -367,13 +379,11 @@ def _carregador_kwh(db: Session, carregador_id: str, kwh: float) -> Carregador:
 @router.post("/recarga/previa")
 def previa_recarga(dados: Previa, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
     carregador = _carregador_kwh(db, dados.carregador_id, dados.kwh)
-    return recarga_app.previa(carregador, round(dados.kwh, 2), carteira.saldo(motorista))
+    return recarga_app.previa(carregador, round(dados.kwh, 2))
 
 
 @router.post("/recarga")
 def criar_recarga(dados: RecargaCreate, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
-    if motorista is None:
-        raise HTTPException(status_code=401, detail="Entre na sua conta para recarregar neste carregador")
     dispositivo = _dispositivo(dados.dispositivo)
     carregador = _carregador_kwh(db, dados.carregador_id, dados.kwh)
     _checar_livre(db, carregador, dispositivo)

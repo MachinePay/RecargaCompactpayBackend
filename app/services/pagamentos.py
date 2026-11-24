@@ -316,8 +316,8 @@ def _reembolsar(db, cobranca: Cobranca, valor: float | None, chave: str) -> str 
                 body=corpo,
                 headers={"X-Idempotency-Key": chave},
             )
-        elif cobranca.origem in ("caixa", "pix"):
-            # Maquininha do caixa e Pix do app: estorna o payment.
+        elif cobranca.origem in ("caixa", "pix", "cartao_app"):
+            # Maquininha do caixa, Pix e cartao do app: estorna o payment.
             mp_request(
                 "POST",
                 f"{MP_API}/v1/payments/{cobranca.mp_payment_id}/refunds",

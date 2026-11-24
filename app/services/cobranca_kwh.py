@@ -147,10 +147,12 @@ def devolve_no_banco(cobranca: Cobranca) -> bool:
     """A sobra volta pelo banco? Carteira: nao (volta para a carteira).
     Maquininha: so no Pix (cartao na maquininha nao tem estorno parcial)."""
     if cobranca.carteira:
-        return False
+        return False  # cobranca antiga da carteira: a sobra volta para a carteira
+    if cobranca.dispositivo_id:
+        return eh_pix(cobranca.metodo)  # app: so o Pix devolve; cartao usa 95% e nao devolve
     if cobranca.origem in ORIGENS_MAQUININHA:
         return eh_pix(cobranca.metodo)
-    return True  # Pix do app antes da carteira
+    return True
 
 
 def kwh_por_valor(carregador: Carregador, valor: float, metodo: str | None = "pix") -> float:
@@ -162,12 +164,13 @@ def kwh_por_valor(carregador: Carregador, valor: float, metodo: str | None = "pi
     return int(valor * percentual_da_maquina(carregador, metodo) / 100 / carregador.preco_kwh * 100 + 1e-9) / 100
 
 
-def valor_por_kwh(carregador: Carregador, kwh: float) -> float:
+def valor_por_kwh(carregador: Carregador, kwh: float, metodo: str | None = "pix") -> float:
     """Valor a pagar adiantado para levar kwh (app): o custo da energia mais a
-    margem (o inverso de kwh_por_valor). O que nao usar volta no fim."""
+    margem (o inverso de kwh_por_valor). Pix: margem do % cadastrado e a
+    sobra volta. Cartao: margem pequena (95%) e nada volta."""
     if not carregador.preco_kwh or kwh <= 0:
         return 0.0
-    return round(kwh * carregador.preco_kwh * 100 / percentual_entrega(carregador), 2)
+    return round(kwh * carregador.preco_kwh * 100 / percentual_da_maquina(carregador, metodo), 2)
 
 
 def kwh_do_pacote(carregador: Carregador, kwh_pacote: float) -> float:

@@ -210,10 +210,10 @@ def test_app_do_motorista_compra_kwh_no_pix(client):
         assert {"kwh": 10, "valor": 20.0} in info["opcoes"]
         r = client.post("/api/v1/publico/pix", json={"carregador_id": "CP-KWH5", "minutos": 30, "dispositivo": "celular-kwh-1"})
         assert r.status_code == 422  # carregador por kWh nao vende minutos
-        # Por kWh precisa de conta (a sobra volta para a carteira).
+        # Sem conta tambem compra kWh (a sobra volta no proprio Pix).
         r = client.post("/api/v1/publico/pix", json={"carregador_id": "CP-KWH5", "kwh": 15, "dispositivo": "celular-kwh-1"})
-        assert r.status_code == 401
-        assert info["precisa_conta"] is True
+        assert r.status_code == 200, r.text
+        assert r.json()["kwh"] == 15 and r.json()["valor"] == 30.0 and info["precisa_conta"] is False
 
 
 def test_previsao_de_termino_pela_potencia():

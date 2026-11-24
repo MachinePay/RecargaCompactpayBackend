@@ -125,6 +125,7 @@ class CarregadorUpdate(BaseModel):
     preco_minutos: int | None = Field(default=None, gt=0, le=24 * 60)
     # Cobranca por kWh (ver services/cobranca_kwh.py).
     modo_cobranca: Literal["tempo", "kwh"] | None = None
+    numero: int | None = Field(default=None, ge=1, le=999999)
     preco_kwh: float | None = Field(default=None, gt=0, le=50)
     kwh_tempo_maximo_min: int | None = Field(default=None, ge=10, le=24 * 60)
     devolver_sobra: bool | None = None
@@ -299,6 +300,7 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "tem_token_mp": bool(pagamentos.token_do_carregador(carregador)),
         "preco_valor": carregador.preco_valor,
         "preco_minutos": carregador.preco_minutos,
+        "numero": carregador.numero,
         "modo_cobranca": carregador.modo_cobranca or "tempo",
         "preco_kwh": carregador.preco_kwh,
         "kwh_tempo_maximo_min": carregador.kwh_tempo_maximo_min,
@@ -361,6 +363,9 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         carregador.ativo = True
     else:
         carregador = Carregador(id_hardware=dados.id_hardware, **campos)
+    if carregador.numero is None:
+        # Proximo numero livre (para o adesivo no carregador).
+        carregador.numero = (db.query(func.max(Carregador.numero)).scalar() or 0) + 1
     if (dados.cep or "").strip():
         # Opcional: endereco e ponto aproximado no mapa. Falhar aqui nao impede o cadastro.
         try:
@@ -629,6 +634,12 @@ def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Sessio
         # O caixa e' da conta MP do cliente antigo; outro dono precisa de caixa novo.
         carregador.mp_user_id = carregador.mp_store_id = carregador.mp_store_external_id = None
         carregador.mp_pos_id = carregador.mp_pos_external_id = None
+    if campos.get("numero") is not None:
+        outro = db.query(Carregador.id_hardware).filter(Carregador.numero == campos["numero"], Carregador.id_hardware != carregador_id).first()
+        if outro:
+            raise HTTPException(status_code=409, detail=f"O numero {campos['numero']} ja e' do carregador {outro[0]}")
+    elif "numero" in campos:
+        campos.pop("numero")  # numero nao fica vazio
     modo = campos.get("modo_cobranca", carregador.modo_cobranca)
     preco_kwh = campos.get("preco_kwh", carregador.preco_kwh)
     if modo == "kwh" and not preco_kwh:

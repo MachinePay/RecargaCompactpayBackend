@@ -47,7 +47,7 @@ def criar_cobranca_pix(
         minutos = cobranca_kwh.teto_minutos(carregador)
         compra = f"{kwh:g} kWh"
     elif kwh is not None:
-        valor = cobranca_kwh.valor_por_kwh(carregador, kwh)
+        valor = max(cobranca_kwh.valor_por_kwh(carregador, kwh, "pix"), 1.0)
         minutos = cobranca_kwh.teto_minutos(carregador)
         compra = f"{kwh:g} kWh"
     else:

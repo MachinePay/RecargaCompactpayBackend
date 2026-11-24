@@ -113,6 +113,9 @@ class Carregador(Base):
     # ChargePointId: ultimo pedaco da URL ws://servidor/ocpp/<id_hardware>
     id_hardware = Column(String, primary_key=True)
     nome_local = Column(String, nullable=False)
+    # Numero curto para o adesivo no carregador (1, 2, 3...). O motorista
+    # digita no app quando nao sabe o nome. Dado na criacao; da para trocar no painel.
+    numero = Column(Integer, unique=True, index=True, nullable=True)
     connector_id = Column(Integer, default=1, nullable=False)
     # Basic Auth do OCPP (opcional). So o hash fica no banco.
     ocpp_senha_hash = Column(String, nullable=True)
