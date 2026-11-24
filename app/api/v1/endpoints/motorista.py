@@ -16,6 +16,11 @@ celular passam para ela.
 5. GET  /publico/historico?dispositivo=        -> recargas deste celular (e da conta)
 6. POST /publico/conta | /publico/entrar        -> cria a conta / entra (devolve o token)
 7. GET  /publico/eu                             -> confere o login
+
+Carregador por kWh (com carteira, precisa de conta):
+8. POST /publico/recarga/previa                -> a conta: energia, reserva, saldo usado, a pagar
+9. POST /publico/recarga                       -> paga (saldo, Pix ou cartao) e libera
+10. GET /publico/carteira                       -> saldo e extrato
 """
 import re
 import threading
@@ -29,7 +34,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.carregador import Carregador, Cobranca, Motorista, SessaoCarga, agora
-from app.services import auth, cobranca_kwh, ocpp_server, pagamentos, pix, sessoes
+from app.services import auth, carteira, cobranca_kwh, ocpp_server, pagamentos, pix, recarga_app, sessoes
 from app.services.ocpp_handlers import energia_kwh
 
 router = APIRouter(prefix="/publico", tags=["motorista"])
@@ -79,7 +84,7 @@ def _pix_pendente(db: Session, carregador_id: str) -> Cobranca | None:
         .filter(
             Cobranca.carregador_id == carregador_id,
             Cobranca.status == "aguardando_pagamento",
-            Cobranca.origem.in_(("pix", "simulado", "point")),
+            Cobranca.origem.in_(("pix", "simulado", "point", "cartao_app")),
         )
         .order_by(Cobranca.id.desc())
         .first()
@@ -123,6 +128,11 @@ def _situacao(db: Session, carregador: Carregador) -> dict:
     }
 
 
+def _public_key(carregador: Carregador) -> str | None:
+    cliente = carregador.cliente
+    return (cliente.mp_public_key or "").strip() or None if cliente is not None and cliente.ativo else None
+
+
 def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
     por_kwh = cobranca_kwh.cobra_por_kwh(carregador)
     preco_hora = None if por_kwh else (pix.valor_por_minutos(carregador, 60) or None)
@@ -144,6 +154,11 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
         # Media das ultimas recargas: o app preve tempo (kWh) ou energia (tempo).
         "potencia_media_kw": cobranca_kwh.potencia_media_kw(db, carregador),
         "aceita_pix": tem_preco and (settings.MP_SIMULADO or bool(pagamentos.token_do_carregador(carregador))),
+        # Por kWh: so com conta (a sobra volta para a carteira) e aceita cartao
+        # se o cliente dono tem a Public Key do MP (o app gera o token do cartao).
+        "precisa_conta": por_kwh,
+        "aceita_cartao": por_kwh and tem_preco and (settings.MP_SIMULADO or bool(_public_key(carregador))),
+        "mp_public_key": _public_key(carregador) if por_kwh else None,
         **_situacao(db, carregador),
     }
 
@@ -201,6 +216,14 @@ class PixCreate(BaseModel):
     dispositivo: str
 
 
+def _forma(cobranca: Cobranca) -> str:
+    if cobranca.origem == "carteira":
+        return "saldo"
+    if cobranca.origem == "cartao_app" or (cobranca.metodo or "").endswith("_card") or cobranca.metodo == "cartao":
+        return "cartao"
+    return "pix"
+
+
 def _serializar_cobranca(db: Session, cobranca: Cobranca) -> dict:
     sessao = db.query(SessaoCarga).filter(SessaoCarga.cobranca_id == cobranca.id).first()
     carregador = db.get(Carregador, cobranca.carregador_id)
@@ -216,6 +239,14 @@ def _serializar_cobranca(db: Session, cobranca: Cobranca) -> dict:
         "valor": cobranca.valor,
         "valor_consumido": cobranca.valor_consumido,
         "valor_devolvido": cobranca.valor_devolvido,
+        # Carteira: o saldo usado, o total separado e o que voltou para a carteira.
+        "carteira": bool(cobranca.carteira),
+        "valor_carteira": cobranca.valor_carteira or 0,
+        "total": carteira.total_da_recarga(cobranca),
+        "valor_creditado": cobranca.valor_creditado,
+        "forma": _forma(cobranca),
+        "cartao_final": cobranca.cartao_final,
+        "motivo_recusa": recarga_app.mensagem_cartao(cobranca.detalhe_status) if cobranca.status == "recusada" else None,
         "simulado": cobranca.origem == "simulado",
         "pix_copia_cola": cobranca.pix_copia_cola if cobranca.status == "aguardando_pagamento" else None,
         "segundos_para_vencer": (
@@ -274,6 +305,19 @@ def gerar_pix(dados: PixCreate, db: Session = Depends(get_db), motorista: Motori
             status_code=422,
             detail=f"Escolha entre {settings.RECARGA_MIN_MINUTOS} e {settings.RECARGA_MAX_MINUTOS} minutos",
         )
+    if por_kwh:
+        if motorista is None:
+            raise HTTPException(status_code=401, detail="Entre na sua conta para recarregar neste carregador")
+        _checar_livre(db, carregador, dispositivo)
+        cobranca = recarga_app.criar(db, carregador, motorista, round(dados.kwh, 2), "pix", dispositivo)
+        return _serializar_cobranca(db, cobranca)
+    _checar_livre(db, carregador, dispositivo)
+    cobranca = pix.criar_cobranca_pix(db, carregador, dados.minutos or 0, dispositivo, motorista.id if motorista else None)
+    return _serializar_cobranca(db, cobranca)
+
+
+def _checar_livre(db: Session, carregador: Carregador, dispositivo: str) -> None:
+    """So vende com o carregador livre e sem ninguem pagando nele agora."""
     pendente = _pix_pendente(db, carregador.id_hardware)
     if pendente is not None and pendente.dispositivo_id == dispositivo:
         # Mesmo celular gerando de novo (voltou e escolheu outro tempo): troca o Pix.
@@ -291,15 +335,57 @@ def gerar_pix(dados: PixCreate, db: Session = Depends(get_db), motorista: Motori
             "ocupado": "O carregador esta em uso",
         }
         raise HTTPException(status_code=409, detail=mensagens.get(situacao, "Carregador indisponivel"))
-    cobranca = pix.criar_cobranca_pix(
-        db,
-        carregador,
-        dados.minutos or 0,
-        dispositivo,
-        motorista.id if motorista else None,
-        kwh=round(dados.kwh, 2) if por_kwh else None,
-    )
+
+
+# ---- Recarga por kWh com carteira ------------------------------------------
+
+class Previa(BaseModel):
+    carregador_id: str
+    kwh: float
+
+
+class RecargaCreate(BaseModel):
+    carregador_id: str
+    kwh: float
+    metodo: str  # saldo | pix | cartao
+    dispositivo: str
+    # O "a pagar" que o motorista viu: se o saldo mudou no meio, nao cobra outro valor.
+    a_pagar: float | None = None
+    # Cartao: o que o formulario do Mercado Pago devolve (token, nunca o numero).
+    cartao: dict | None = None
+
+
+def _carregador_kwh(db: Session, carregador_id: str, kwh: float) -> Carregador:
+    carregador = _obter(db, carregador_id)
+    if not cobranca_kwh.cobra_por_kwh(carregador) or not carregador.preco_kwh:
+        raise HTTPException(status_code=409, detail="Este carregador nao cobra por kWh")
+    if not settings.RECARGA_MIN_KWH <= kwh <= settings.RECARGA_MAX_KWH:
+        raise HTTPException(status_code=422, detail=f"Escolha entre {settings.RECARGA_MIN_KWH:g} e {settings.RECARGA_MAX_KWH:g} kWh")
+    return carregador
+
+
+@router.post("/recarga/previa")
+def previa_recarga(dados: Previa, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
+    carregador = _carregador_kwh(db, dados.carregador_id, dados.kwh)
+    return recarga_app.previa(carregador, round(dados.kwh, 2), carteira.saldo(motorista))
+
+
+@router.post("/recarga")
+def criar_recarga(dados: RecargaCreate, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
+    if motorista is None:
+        raise HTTPException(status_code=401, detail="Entre na sua conta para recarregar neste carregador")
+    dispositivo = _dispositivo(dados.dispositivo)
+    carregador = _carregador_kwh(db, dados.carregador_id, dados.kwh)
+    _checar_livre(db, carregador, dispositivo)
+    cobranca = recarga_app.criar(db, carregador, motorista, round(dados.kwh, 2), dados.metodo, dispositivo, dados.a_pagar, dados.cartao)
     return _serializar_cobranca(db, cobranca)
+
+
+@router.get("/carteira")
+def ver_carteira(pagina: int = 1, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
+    if motorista is None:
+        raise HTTPException(status_code=401, detail="Entre na sua conta para ver a carteira")
+    return {"saldo": carteira.saldo(motorista), **carteira.extrato(db, motorista.id, pagina)}
 
 
 @router.get("/cobrancas/{cobranca_id}")
@@ -332,6 +418,12 @@ def simular_pagamento(cobranca_id: int, dispositivo: str = Query(...), db: Sessi
     return _serializar_cobranca(db, cobranca)
 
 
+def _gasto(item: dict) -> float:
+    if item["carteira"]:
+        return item["valor_consumido"] if item["valor_consumido"] is not None else item["total"]
+    return item["valor"] - (item["valor_devolvido"] or 0)
+
+
 @router.get("/historico")
 def historico(dispositivo: str = Query(...), db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
     """Recargas pagas por este celular (e, logado, pela conta), com os totais."""
@@ -354,8 +446,8 @@ def historico(dispositivo: str = Query(...), db: Session = Depends(get_db), moto
     return {
         "totais": {
             "recargas": len(validas),
-            # Por kWh, o que voltou para o motorista nao conta como gasto.
-            "valor": round(sum(i["valor"] - (i["valor_devolvido"] or 0) for i in validas), 2),
+            # Gasto de verdade: no kWh, o que voltou (banco ou carteira) nao conta.
+            "valor": round(sum(_gasto(i) for i in validas), 2),
             "kwh": round(sum((i["sessao"] or {}).get("energia_kwh") or 0 for i in validas), 3),
             "minutos": sum(i["minutos"] for i in validas),
             "carregadores": len({i["carregador_id"] for i in validas}),
@@ -384,8 +476,26 @@ def _telefone(valor: str) -> str:
     return digitos
 
 
+EMAIL_VALIDO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _email(valor: str | None) -> str | None:
+    email = (valor or "").strip().lower()
+    if not email:
+        return None
+    if len(email) > 120 or not EMAIL_VALIDO.match(email):
+        raise HTTPException(status_code=422, detail="E-mail invalido")
+    return email
+
+
 def _serializar_motorista(motorista: Motorista) -> dict:
-    return {"id": motorista.id, "nome": motorista.nome, "telefone": motorista.telefone}
+    return {
+        "id": motorista.id,
+        "nome": motorista.nome,
+        "telefone": motorista.telefone,
+        "email": motorista.email,
+        "saldo": carteira.saldo(motorista),
+    }
 
 
 def _sessao_da_conta(db: Session, motorista: Motorista, dispositivo: str | None) -> dict:
@@ -402,14 +512,21 @@ def _sessao_da_conta(db: Session, motorista: Motorista, dispositivo: str | None)
 class ContaCreate(BaseModel):
     nome: str
     telefone: str
+    email: str | None = None
     senha: str
     dispositivo: str | None = None
 
 
 class Entrar(BaseModel):
-    telefone: str
+    # Celular ou e-mail (o app manda em "login"; "telefone" fica para apps antigos).
+    login: str | None = None
+    telefone: str | None = None
     senha: str
     dispositivo: str | None = None
+
+
+class ContaUpdate(BaseModel):
+    email: str
 
 
 @router.post("/conta")
@@ -420,9 +537,14 @@ def criar_conta(dados: ContaCreate, db: Session = Depends(get_db)):
     if len(dados.senha or "") < 6:
         raise HTTPException(status_code=422, detail="A senha precisa ter pelo menos 6 caracteres")
     telefone = _telefone(dados.telefone)
+    email = _email(dados.email)
+    if not email:
+        raise HTTPException(status_code=422, detail="Informe seu e-mail")
     if db.query(Motorista.id).filter(Motorista.telefone == telefone).first():
         raise HTTPException(status_code=409, detail="Ja existe uma conta com esse celular. Entre com a sua senha.")
-    motorista = Motorista(nome=nome[:80], telefone=telefone, senha_hash=auth.hash_senha(dados.senha))
+    if db.query(Motorista.id).filter(Motorista.email == email).first():
+        raise HTTPException(status_code=409, detail="Ja existe uma conta com esse e-mail. Entre com a sua senha.")
+    motorista = Motorista(nome=nome[:80], telefone=telefone, email=email, senha_hash=auth.hash_senha(dados.senha))
     db.add(motorista)
     db.flush()
     return _sessao_da_conta(db, motorista, dados.dispositivo)
@@ -430,20 +552,27 @@ def criar_conta(dados: ContaCreate, db: Session = Depends(get_db)):
 
 @router.post("/entrar")
 def entrar(dados: Entrar, db: Session = Depends(get_db)):
-    telefone = _telefone(dados.telefone)
+    login = (dados.login or dados.telefone or "").strip()
+    if "@" in login:
+        email = _email(login)
+        telefone = email  # chave do bloqueio por tentativas
+        filtro = Motorista.email == email
+    else:
+        telefone = _telefone(login)
+        filtro = Motorista.telefone == telefone
     with _trava_falhas:
         falhas, desde = _falhas.get(telefone, (0, None))
         if falhas >= MAX_FALHAS_LOGIN and desde and agora() - desde < BLOQUEIO_LOGIN:
             raise HTTPException(status_code=429, detail="Muitas tentativas. Espere 10 minutos e tente de novo.")
-    motorista = db.query(Motorista).filter(Motorista.telefone == telefone).first()
+    motorista = db.query(Motorista).filter(filtro).first()
     if motorista is None or not motorista.ativo or not auth.conferir_senha(dados.senha, motorista.senha_hash):
         with _trava_falhas:
             falhas, desde = _falhas.get(telefone, (0, None))
             if desde and agora() - desde >= BLOQUEIO_LOGIN:
                 falhas = 0
             _falhas[telefone] = (falhas + 1, agora())
-        # Mesma resposta para celular ou senha errados.
-        raise HTTPException(status_code=401, detail="Celular ou senha incorretos")
+        # Mesma resposta para login ou senha errados.
+        raise HTTPException(status_code=401, detail="Celular/e-mail ou senha incorretos")
     with _trava_falhas:
         _falhas.pop(telefone, None)
     return _sessao_da_conta(db, motorista, dados.dispositivo)
@@ -453,4 +582,20 @@ def entrar(dados: Entrar, db: Session = Depends(get_db)):
 def eu(motorista: Motorista | None = Depends(motorista_logado)):
     if motorista is None:
         raise HTTPException(status_code=401, detail="Entre de novo")
+    return _serializar_motorista(motorista)
+
+
+@router.patch("/eu")
+def atualizar_conta(dados: ContaUpdate, db: Session = Depends(get_db), motorista: Motorista | None = Depends(motorista_logado)):
+    """Conta antiga sem e-mail: cadastra para tambem entrar com ele."""
+    if motorista is None:
+        raise HTTPException(status_code=401, detail="Entre de novo")
+    email = _email(dados.email)
+    if not email:
+        raise HTTPException(status_code=422, detail="Informe seu e-mail")
+    outro = db.query(Motorista.id).filter(Motorista.email == email, Motorista.id != motorista.id).first()
+    if outro:
+        raise HTTPException(status_code=409, detail="Esse e-mail ja esta em outra conta")
+    motorista.email = email
+    db.commit()
     return _serializar_motorista(motorista)

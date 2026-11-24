@@ -10,6 +10,7 @@ from app.db.session import SessionLocal
 from app.main import app
 from app.models.carregador import Cobranca, SessaoCarga, agora
 from app.services import pagamentos, sessoes
+from tests.conftest import MP_TESTE
 
 ADMIN = {"X-Admin-Key": "admin-teste"}
 
@@ -53,7 +54,7 @@ def cliente_teste(client) -> int:
     for c in client.get("/api/v1/admin/clientes", headers=ADMIN).json():
         if c["nome_empresa"] == "Cliente teste":
             return c["id"]
-    return client.post("/api/v1/admin/clientes", json={"nome_empresa": "Cliente teste", "cliente_mercado_pago": True}, headers=ADMIN).json()["id"]
+    return client.post("/api/v1/admin/clientes", json={"nome_empresa": "Cliente teste", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()["id"]
 
 
 def _setup(client, cp_id: str, **extra) -> tuple[int, dict]:

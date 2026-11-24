@@ -109,17 +109,51 @@ def teto_minutos(carregador: Carregador) -> int:
     return carregador.kwh_tempo_maximo_min or settings.KWH_TEMPO_MAXIMO_MINUTOS
 
 
+# Pagamento na maquininha que nao e' Pix (cartao): o banco nao devolve parte.
+PERCENTUAL_CARTAO_MAQUINA_PADRAO = 95
+# Vendas feitas numa maquininha (caixa MP, SumUp, Point do tablet). "simulado"
+# e' o teste do painel/bancada.
+ORIGENS_MAQUININHA = ("caixa", "sumup", "point", "simulado")
+
+
+def eh_pix(metodo: str | None) -> bool:
+    """Pix no MP vem como payment_type_id "bank_transfer" (ou o id "pix"); na
+    SumUp, "pix". O teste da bancada ("simulado") conta como Pix."""
+    m = (metodo or "").lower()
+    return "pix" in m or m in ("bank_transfer", "simulado")
+
+
 def percentual_entrega(carregador: Carregador) -> int:
+    """% que vira energia no Pix (app e maquininha): o resto e' margem e volta."""
     return carregador.kwh_percentual_entrega or 100
 
 
-def kwh_por_valor(carregador: Carregador, valor: float) -> float:
-    """Energia que um valor livre (maquininha) libera: so o percentual de
-    entrega do valor vira kWh; o resto e' margem e volta se nao for usado.
+def percentual_cartao_maquina(carregador: Carregador) -> int:
+    """% que vira energia no cartao da maquininha (sem devolucao)."""
+    return carregador.kwh_percentual_cartao_maquina or PERCENTUAL_CARTAO_MAQUINA_PADRAO
+
+
+def percentual_da_maquina(carregador: Carregador, metodo: str | None) -> int:
+    return percentual_entrega(carregador) if eh_pix(metodo) else percentual_cartao_maquina(carregador)
+
+
+def devolve_no_banco(cobranca: Cobranca) -> bool:
+    """A sobra volta pelo banco? Carteira: nao (volta para a carteira).
+    Maquininha: so no Pix (cartao na maquininha nao tem estorno parcial)."""
+    if cobranca.carteira:
+        return False
+    if cobranca.origem in ORIGENS_MAQUININHA:
+        return eh_pix(cobranca.metodo)
+    return True  # Pix do app antes da carteira
+
+
+def kwh_por_valor(carregador: Carregador, valor: float, metodo: str | None = "pix") -> float:
+    """Energia que um valor livre (maquininha) libera. Pix: o % cadastrado
+    (o resto e' margem e volta). Cartao: o % do cartao (padrao 95), sem volta.
     Arredondada para baixo em 0,01 kWh."""
     if not carregador.preco_kwh or carregador.preco_kwh <= 0 or valor <= 0:
         return 0.0
-    return int(valor * percentual_entrega(carregador) / 100 / carregador.preco_kwh * 100 + 1e-9) / 100
+    return int(valor * percentual_da_maquina(carregador, metodo) / 100 / carregador.preco_kwh * 100 + 1e-9) / 100
 
 
 def valor_por_kwh(carregador: Carregador, kwh: float) -> float:
@@ -172,24 +206,26 @@ def calcular_acerto(cobrancas: list[Cobranca], consumido_kwh: float) -> list[tup
     restante = max(0.0, consumido_kwh)
     resultado = []
     for cobranca in cobrancas:
-        if cobranca.status != "aprovada" or cobranca.estornada_em is not None or not cobranca.kwh or cobranca.valor <= 0:
+        # Com carteira, o separado e' o pago agora + o saldo usado.
+        total = round((cobranca.valor or 0) + (cobranca.valor_carteira or 0), 2)
+        if cobranca.status != "aprovada" or cobranca.estornada_em is not None or not cobranca.kwh or total <= 0:
             continue
-        preco = cobranca.preco_kwh or cobranca.valor / cobranca.kwh
-        capacidade = cobranca.valor / preco
+        preco = cobranca.preco_kwh or total / cobranca.kwh
+        capacidade = total / preco
         usado = min(capacidade, restante)
         restante -= usado
         if usado >= capacidade - 1e-9:
-            consumido = cobranca.valor
+            consumido = total
         else:
-            consumido = min(cobranca.valor, round(usado * preco, 2))
-        resultado.append((cobranca, consumido, round(cobranca.valor - consumido, 2)))
+            consumido = min(total, round(usado * preco, 2))
+        resultado.append((cobranca, consumido, round(total - consumido, 2)))
     return resultado
 
 
 def acertar(db, sessao: SessaoCarga) -> None:
     """Fim de uma recarga por kWh: registra o consumo e devolve a sobra.
     Roda uma vez por recarga (acerto_em)."""
-    from app.services import pagamentos  # pagamentos importa ocpp_handlers
+    from app.services import carteira, pagamentos  # pagamentos importa ocpp_handlers
 
     alterou = (
         db.query(SessaoCarga)
@@ -207,7 +243,7 @@ def acertar(db, sessao: SessaoCarga) -> None:
     if not medido(sessao):
         if sessao.energia_desde is None:
             return
-        sessao.acerto_erro = "O carregador nao informou o medidor: nao da para saber quanto foi usado. Nada foi devolvido."
+        sessao.acerto_erro = "O carregador nao informou o medidor: nao da para saber quanto foi usado. Nada foi devolvido (nem para a carteira)."
         registrar_historico(db, sessao.carregador_id, "PAGAMENTO", f"ATENCAO: recarga {sessao.id} por kWh sem leitura do medidor; sobra nao devolvida")
         db.commit()
         return
@@ -218,6 +254,12 @@ def acertar(db, sessao: SessaoCarga) -> None:
     for cobranca, consumido, sobra in calcular_acerto(cobrancas_da_sessao(db, sessao), consumido_kwh):
         cobranca.valor_consumido = consumido
         db.commit()
+        if cobranca.carteira:
+            # App: a sobra (qualquer valor) volta para a carteira do motorista.
+            carteira.creditar_sobra(db, cobranca, sobra)
+            continue
+        if not devolve_no_banco(cobranca):
+            continue  # cartao na maquininha: sem devolucao (por isso so 95% vira energia)
         if sobra < settings.KWH_DEVOLUCAO_MINIMA or not devolver:
             continue
         if not pagamentos.devolver_parte(db, cobranca, sobra):

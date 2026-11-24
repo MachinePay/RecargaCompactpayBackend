@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
-from app.services import auth, cobranca_kwh, diagnostico, geo, trava, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
+from app.models.carregador import Carregador, Cliente, Cobranca, HistoricoOperacao, Motorista, PacoteTempo, SessaoCarga, TerminalTablet, Usuario, agora
+from app.services import auth, carteira, cobranca_kwh, diagnostico, geo, trava, mercado_pago_caixa, ocpp_server, pagamentos, relatorios, saude, sessoes, sumup, terminais
 from app.services.ocpp_handlers import STATUS_SESSAO_ATIVA, energia_kwh, registrar_historico
 from app.api.v1.endpoints.tablet import serializar_sessao
 
@@ -129,6 +129,7 @@ class CarregadorUpdate(BaseModel):
     kwh_tempo_maximo_min: int | None = Field(default=None, ge=10, le=24 * 60)
     devolver_sobra: bool | None = None
     kwh_percentual_entrega: int | None = Field(default=None, ge=50, le=100)
+    kwh_percentual_cartao_maquina: int | None = Field(default=None, ge=50, le=100)
 
 
 class ClienteDados(BaseModel):
@@ -171,6 +172,8 @@ class EnderecoLoja(BaseModel):
 
 class PagamentoSimulado(BaseModel):
     valor: float = Field(gt=0)
+    # Como se fosse Pix ou cartao na maquininha (no modo kWh muda o % e a devolucao).
+    metodo: Literal["pix", "cartao"] = "pix"
 
 
 class PacoteCreate(BaseModel):
@@ -220,14 +223,14 @@ def _indicadores_hoje(db: Session, ids: list[str] | None = None) -> dict[str, di
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
+            Cobranca.origem.in_(ORIGENS_FATURAMENTO),
             *([Cobranca.carregador_id.in_(ids)] if ids is not None else []),
         )
         .all()
     )
     for venda in vendas:
         dados = item(venda.carregador_id)
-        dados["faturamento_hoje"] = round(dados["faturamento_hoje"] + venda.valor, 2)
+        dados["faturamento_hoje"] = round(dados["faturamento_hoje"] + relatorios.liquido(venda), 2)
         dados["vendas_hoje"] += 1
     sessoes_hoje = db.query(SessaoCarga).filter(SessaoCarga.inicio >= inicio)
     if ids is not None:
@@ -302,6 +305,8 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "kwh_tempo_maximo_padrao": settings.KWH_TEMPO_MAXIMO_MINUTOS,
         "devolver_sobra": carregador.devolver_sobra is not False,
         "kwh_percentual_entrega": carregador.kwh_percentual_entrega,
+        "kwh_percentual_cartao_maquina": carregador.kwh_percentual_cartao_maquina,
+        "kwh_percentual_cartao_padrao": cobranca_kwh.PERCENTUAL_CARTAO_MAQUINA_PADRAO,
         "mp_store_id": carregador.mp_store_id,
         "mp_store_external_id": carregador.mp_store_external_id,
         "mp_pos_id": carregador.mp_pos_id,
@@ -347,7 +352,8 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         carregador = existente
         for campo in ("mp_user_id", "mp_store_id", "mp_store_external_id", "mp_pos_id", "mp_pos_external_id",
                       "preco_valor", "preco_minutos", "modo_cobranca", "preco_kwh",
-                      "kwh_tempo_maximo_min", "devolver_sobra", "kwh_percentual_entrega", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
+                      "kwh_tempo_maximo_min", "devolver_sobra", "kwh_percentual_entrega",
+                      "kwh_percentual_cartao_maquina", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
             setattr(carregador, campo, None)
         for campo, valor in campos.items():
             setattr(carregador, campo, valor)
@@ -513,13 +519,24 @@ def listar_carregadores(
         Carregador.excluido_em.is_(None), *([] if acesso.admin else [Carregador.cliente_id == acesso.cliente_id])
     )
     vendas = (
-        db.query(func.coalesce(func.sum(Cobranca.valor), 0), func.count(Cobranca.id))
+        db.query(
+            func.coalesce(
+                func.sum(
+                    Cobranca.valor
+                    + func.coalesce(Cobranca.valor_carteira, 0)
+                    - func.coalesce(Cobranca.valor_devolvido, 0)
+                    - func.coalesce(Cobranca.valor_creditado, 0)
+                ),
+                0,
+            ),
+            func.count(Cobranca.id),
+        )
         .filter(
             Cobranca.carregador_id.in_(ids_visiveis),
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= _inicio_do_dia(),
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
+            Cobranca.origem.in_(ORIGENS_FATURAMENTO),
         )
         .one()
     )
@@ -582,7 +599,7 @@ def resumo(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)
             Cobranca.status == "aprovada",
             Cobranca.pago_em >= inicio_dia,
             Cobranca.estornada_em.is_(None),
-            Cobranca.origem.in_(("point", "simulado", "caixa", "sumup", "pix")),
+            Cobranca.origem.in_(ORIGENS_FATURAMENTO),
             Cobranca.carregador_id.in_(ids),
         )
         .all()
@@ -593,7 +610,7 @@ def resumo(db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)
         "carregadores_online": sum(1 for c in carregadores if ocpp_server.esta_conectado(c.id_hardware)),
         "sessoes_ativas": db.query(SessaoCarga).filter(SessaoCarga.status.in_(STATUS_SESSAO_ATIVA), SessaoCarga.carregador_id.in_(ids)).count(),
         # Sobra devolvida no modo kWh nao e' faturamento.
-        "faturamento_hoje": round(sum(v.valor - (v.valor_devolvido or 0) for v in vendas), 2),
+        "faturamento_hoje": round(sum(relatorios.liquido(v) for v in vendas), 2),
         "vendas_hoje": len(vendas),
         "energia_hoje_kwh": round(sum(energia_kwh(s) for s in sessoes_hoje), 3),
         "estornos_pendentes": db.query(Cobranca)
@@ -630,6 +647,9 @@ def atualizar_carregador(carregador_id: str, dados: CarregadorUpdate, db: Sessio
             resposta["aviso_mp"] = f"Nome salvo aqui, mas o Mercado Pago recusou renomear: {exc.detail}"
     return resposta
 
+
+# Vendas que contam no faturamento (simulado = teste de bancada).
+ORIGENS_FATURAMENTO = ("point", "simulado", "caixa", "sumup", "pix", "cartao_app", "carteira")
 
 # Listas que crescem sem parar (recargas, historico) sao sempre paginadas.
 POR_PAGINA_MAX = 100
@@ -794,7 +814,9 @@ def _acerto_kwh(db: Session, sessao: SessaoCarga) -> dict:
     cobrancas = cobranca_kwh.cobrancas_da_sessao(db, sessao)
     consumidos = [c.valor_consumido for c in cobrancas if c.valor_consumido is not None]
     return {
-        "valor_pago": round(sum(c.valor for c in cobrancas if c.status == "aprovada"), 2),
+        # Com carteira, o separado inclui o saldo usado.
+        "valor_pago": round(sum(c.valor + (c.valor_carteira or 0) for c in cobrancas if c.status == "aprovada"), 2),
+        "valor_creditado": round(sum(c.valor_creditado or 0 for c in cobrancas), 2),
         "valor_consumido": round(sum(consumidos), 2) if consumidos else None,
         "valor_devolvido": round(sum(c.valor_devolvido or 0 for c in cobrancas), 2),
         "acerto_erro": sessao.acerto_erro,
@@ -931,12 +953,13 @@ def simular_pagamento_caixa(carregador_id: str, dados: PagamentoSimulado, db: Se
     mesma regra de preco e liberacao, sem chamar o Mercado Pago."""
     carregador = _obter(db, carregador_id)
     if cobranca_kwh.cobra_por_kwh(carregador):
-        if not cobranca_kwh.kwh_por_valor(carregador, dados.valor):
+        metodo_sim = "pix" if dados.metodo == "pix" else "debit_card"
+        if not cobranca_kwh.kwh_por_valor(carregador, dados.valor, metodo_sim):
             raise HTTPException(status_code=422, detail="Configure o preco do kWh do carregador antes")
     elif not mercado_pago_caixa.minutos_por_valor(carregador, dados.valor):
         raise HTTPException(status_code=422, detail="Configure a regra de preco do carregador antes (ex.: R$ 10 = 20 min)")
     cobranca = mercado_pago_caixa.registrar_pagamento(
-        db, carregador, dados.valor, f"sim-{uuid4().hex[:10]}", "simulado", origem="simulado"
+        db, carregador, dados.valor, f"sim-{uuid4().hex[:10]}", "pix" if dados.metodo == "pix" else "debit_card", origem="simulado"
     )
     db.refresh(cobranca)
     ativa = sessoes.sessao_ativa(db, carregador_id)
@@ -984,6 +1007,8 @@ def _serializar_cliente(cliente: Cliente, db: Session) -> dict:
         "token_mp_prefixo": (cliente.mp_access_token or "")[:12] or None,
         # Public Key e Client ID nao sao segredo; o Client Secret nunca volta.
         "mp_public_key": cliente.mp_public_key,
+        # Cliente antigo do MP sem Token/Public Key: o painel avisa para completar.
+        "mp_incompleto": "mercado_pago" in _bancos_do_cliente(cliente) and not (cliente.mp_access_token and cliente.mp_public_key),
         "mp_client_id": cliente.mp_client_id,
         "tem_client_secret": bool(cliente.mp_client_secret),
         "mp_user_id": cliente.mp_user_id,
@@ -1017,6 +1042,25 @@ def _aplicar_dados_cliente(cliente: Cliente, dados: ClienteDados) -> None:
         except HTTPException as exc:
             raise HTTPException(status_code=422, detail=f"Token do Mercado Pago recusado: {exc.detail}") from exc
         cliente.mp_access_token = token
+
+
+def _exigir_credenciais_mp(cliente: Cliente) -> None:
+    """Cliente que recebe pelo Mercado Pago precisa do Access Token (cobra,
+    estorna, cria o caixa) e da Public Key (cartao no app do motorista).
+    Os dois tem que ser do mesmo ambiente (producao APP_USR- ou teste TEST-)."""
+    if "mercado_pago" not in _bancos_do_cliente(cliente):
+        return
+    faltando = [nome for nome, valor in (("Access Token", cliente.mp_access_token), ("Public Key", cliente.mp_public_key)) if not (valor or "").strip()]
+    if faltando:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Mercado Pago: preencha {' e '.join(faltando)} (Mercado Pago Developers > Suas integracoes > Credenciais de producao)",
+        )
+    chave = cliente.mp_public_key.strip()
+    if not chave.startswith(("APP_USR-", "TEST-")):
+        raise HTTPException(status_code=422, detail="Public Key do Mercado Pago invalida: ela comeca com APP_USR- (ou TEST- no teste)")
+    if chave.startswith("TEST-") != cliente.mp_access_token.strip().startswith("TEST-"):
+        raise HTTPException(status_code=422, detail="Access Token e Public Key sao de ambientes diferentes (um de teste e outro de producao)")
 
 
 @router.get("/clientes")
@@ -1066,6 +1110,7 @@ def criar_cliente(dados: ClienteDados, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail="Informe o nome do cliente")
     cliente = Cliente(nome_empresa=dados.nome_empresa.strip())
     _aplicar_dados_cliente(cliente, dados)
+    _exigir_credenciais_mp(cliente)
     db.add(cliente)
     db.flush()
     _criar_acesso_cliente(db, cliente, dados)
@@ -1098,6 +1143,7 @@ def atualizar_cliente(cliente_id: int, dados: ClienteDados, db: Session = Depend
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente nao encontrado")
     _aplicar_dados_cliente(cliente, dados)
+    _exigir_credenciais_mp(cliente)
     _criar_acesso_cliente(db, cliente, dados)
     db.commit()
     return _serializar_cliente(cliente, db)
@@ -1457,3 +1503,57 @@ def ler_corrente(carregador_id: str, db: Session = Depends(get_db), acesso: Aces
         "configurado_a": carregador.corrente_maxima_a,
         "resposta": resposta,
     }
+
+
+# ---- Motoristas e carteira --------------------------------------------------
+
+class AjusteCarteira(BaseModel):
+    # Positivo credita, negativo debita (ex.: devolver uma recarga com problema).
+    valor: float = Field(ge=-10000, le=10000)
+    motivo: str = Field(min_length=3, max_length=200)
+
+
+def _serializar_motorista_admin(m: Motorista) -> dict:
+    return {
+        "id": m.id,
+        "nome": m.nome,
+        "telefone": m.telefone,
+        "email": m.email,
+        "saldo": carteira.saldo(m),
+        "ativo": m.ativo,
+        "ultimo_login": m.ultimo_login,
+        "created_at": m.created_at,
+    }
+
+
+@router.get("/motoristas", dependencies=[Depends(exigir_admin)])
+def listar_motoristas(pagina: int = 1, por_pagina: int = 25, busca: str | None = None, com_saldo: bool = False, db: Session = Depends(get_db)):
+    """Contas do app do motorista, com o saldo da carteira (paginado no servidor)."""
+    query = _busca(db.query(Motorista), busca, Motorista.nome, Motorista.telefone, Motorista.email)
+    if com_saldo:
+        query = query.filter(Motorista.saldo > 0)
+    resultado = _paginar(query, pagina, por_pagina, Motorista.nome.asc())
+    resultado["itens"] = [_serializar_motorista_admin(m) for m in resultado["itens"]]
+    return resultado
+
+
+@router.get("/motoristas/{motorista_id}/carteira", dependencies=[Depends(exigir_admin)])
+def extrato_motorista(motorista_id: int, pagina: int = 1, db: Session = Depends(get_db)):
+    motorista = db.get(Motorista, motorista_id)
+    if motorista is None:
+        raise HTTPException(status_code=404, detail="Motorista nao encontrado")
+    return {"motorista": _serializar_motorista_admin(motorista), **carteira.extrato(db, motorista_id, pagina)}
+
+
+@router.post("/motoristas/{motorista_id}/ajuste", dependencies=[Depends(exigir_admin)])
+def ajustar_carteira(motorista_id: int, dados: AjusteCarteira, db: Session = Depends(get_db), acesso: Acesso = Depends(acesso_atual)):
+    """Credito ou debito manual (atendimento). Fica no extrato com o motivo."""
+    if db.get(Motorista, motorista_id) is None:
+        raise HTTPException(status_code=404, detail="Motorista nao encontrado")
+    if round(dados.valor, 2) == 0:
+        raise HTTPException(status_code=422, detail="Informe um valor diferente de zero")
+    try:
+        saldo = carteira.movimentar(db, motorista_id, dados.valor, "ajuste", f"{dados.motivo} (por {acesso.nome or 'admin'})")
+    except carteira.SaldoInsuficiente:
+        raise HTTPException(status_code=409, detail="O saldo ficaria negativo")
+    return {"saldo": saldo}

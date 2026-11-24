@@ -6,6 +6,7 @@ from app.db.migracoes import adicionar_colunas_faltando
 from app.db.session import SessionLocal
 from app.models.carregador import Cobranca, SessaoCarga
 from app.services import pagamentos
+from tests.conftest import MP_TESTE
 from tests.test_fluxo_carga import ADMIN, cliente_teste, CarregadorFake, _esperar, client  # noqa: F401 - fixture
 
 
@@ -158,7 +159,7 @@ def test_cliente_com_token_proprio_cria_caixa_com_o_endereco_dele(client, monkey
 
     r = client.post(
         "/api/v1/admin/clientes",
-        json={"nome_empresa": "Gira Kids", "mp_access_token": "APP_USR-bom", "endereco_rua": "Rua A", "endereco_numero": "10",
+        json={"nome_empresa": "Gira Kids", "mp_access_token": "APP_USR-bom", "mp_public_key": "APP_USR-pub-bom", "endereco_rua": "Rua A", "endereco_numero": "10",
               "endereco_cidade": "Campinas", "endereco_estado": "Sao Paulo"},
         headers=ADMIN,
     )
@@ -178,13 +179,27 @@ def test_cliente_com_token_proprio_cria_caixa_com_o_endereco_dele(client, monkey
     assert r.json()["tem_token_mp"] and r.json()["carregadores"] == 1
 
 
+def test_cliente_do_mercado_pago_exige_token_e_public_key(client):
+    base = {"nome_empresa": "Sem chave", "cliente_mercado_pago": True}
+    r = client.post("/api/v1/admin/clientes", json={**base, "mp_access_token": MP_TESTE["mp_access_token"]}, headers=ADMIN)
+    assert r.status_code == 422 and "Public Key" in r.json()["detail"]
+    r = client.post("/api/v1/admin/clientes", json={**base, "mp_public_key": "TEST-x"}, headers=ADMIN)
+    assert r.status_code == 422 and "Access Token" in r.json()["detail"]
+    r = client.post("/api/v1/admin/clientes", json={**base, "mp_access_token": MP_TESTE["mp_access_token"], "mp_public_key": "APP_USR-x"}, headers=ADMIN)
+    assert r.status_code == 422 and "ambientes diferentes" in r.json()["detail"]
+    r = client.post("/api/v1/admin/clientes", json={**base, "mp_access_token": MP_TESTE["mp_access_token"], "mp_public_key": "chave"}, headers=ADMIN)
+    assert r.status_code == 422
+    # So SumUp nao precisa das credenciais do MP.
+    assert client.post("/api/v1/admin/clientes", json={"nome_empresa": "So SumUp", "cliente_mercado_pago": False}, headers=ADMIN).status_code == 200
+
+
 def test_cliente_guarda_public_key_client_id_e_secret(client):
     r = client.post(
         "/api/v1/admin/clientes",
-        json={"nome_empresa": "Com OAuth", "cliente_mercado_pago": True, "mp_public_key": "APP_USR-pub", "mp_client_id": "123", "mp_client_secret": "segredo"},
+        json={"nome_empresa": "Com OAuth", "cliente_mercado_pago": True, **MP_TESTE, "mp_client_id": "123", "mp_client_secret": "segredo"},
         headers=ADMIN,
     ).json()
-    assert r["mp_public_key"] == "APP_USR-pub" and r["mp_client_id"] == "123" and r["tem_client_secret"]
+    assert r["mp_public_key"] == MP_TESTE["mp_public_key"] and r["mp_client_id"] == "123" and r["tem_client_secret"]
     assert "segredo" not in str(r)
     # Editar sem mandar o secret mantem o salvo.
     r = client.patch(f"/api/v1/admin/clientes/{r['id']}", json={"mp_client_id": "456"}, headers=ADMIN).json()

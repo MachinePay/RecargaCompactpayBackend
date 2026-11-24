@@ -35,12 +35,18 @@ def _data_mp(momento) -> str:
 
 
 def criar_cobranca_pix(
-    db, carregador: Carregador, minutos: int, dispositivo_id: str, motorista_id: int | None = None, kwh: float | None = None
+    db, carregador: Carregador, minutos: int, dispositivo_id: str, motorista_id: int | None = None, kwh: float | None = None,
+    valor_carteira: float | None = None, valor_a_pagar: float | None = None,
 ) -> Cobranca:
-    """kwh preenchido = compra de energia (modo kWh); minutos vira o teto."""
+    """kwh preenchido = compra de energia (modo kWh); minutos vira o teto.
+    Com valor_carteira (recarga da carteira), o Pix cobra so valor_a_pagar."""
     from app.services import cobranca_kwh  # importa ocpp_handlers
 
-    if kwh is not None:
+    if valor_a_pagar is not None:
+        valor = valor_a_pagar
+        minutos = cobranca_kwh.teto_minutos(carregador)
+        compra = f"{kwh:g} kWh"
+    elif kwh is not None:
         valor = cobranca_kwh.valor_por_kwh(carregador, kwh)
         minutos = cobranca_kwh.teto_minutos(carregador)
         compra = f"{kwh:g} kWh"
@@ -54,6 +60,8 @@ def criar_cobranca_pix(
     cobranca = Cobranca(
         carregador_id=carregador.id_hardware,
         minutos=minutos,
+        carteira=True if valor_carteira is not None else None,
+        valor_carteira=valor_carteira or None,
         kwh=kwh,
         preco_kwh=carregador.preco_kwh if kwh is not None else None,
         valor=valor,
@@ -104,8 +112,8 @@ def criar_cobranca_pix(
 
 
 def consultar(db, cobranca: Cobranca) -> None:
-    """Reconsulta o Pix no MP e aplica o resultado na cobranca."""
-    if cobranca.origem != "pix" or not cobranca.mp_payment_id:
+    """Reconsulta o Pix (ou o cartao do app) no MP e aplica o resultado."""
+    if cobranca.origem not in ("pix", "cartao_app") or not cobranca.mp_payment_id:
         return
     carregador = db.get(Carregador, cobranca.carregador_id)
     pagamento = pagamentos.mp_request(
@@ -125,7 +133,8 @@ def consultar(db, cobranca: Cobranca) -> None:
             db.commit()
             return
         db.commit()
-        pagamentos.aprovar_cobranca(db, cobranca.id, payment_id=cobranca.mp_payment_id, metodo="pix")
+        metodo = "pix" if cobranca.origem == "pix" else (pagamento.get("payment_type_id") or "cartao")
+        pagamentos.aprovar_cobranca(db, cobranca.id, payment_id=cobranca.mp_payment_id, metodo=metodo)
     elif status in STATUS_FINAIS and cobranca.status == "aguardando_pagamento":
         cobranca.status = STATUS_FINAIS[status]
         db.commit()

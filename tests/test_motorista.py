@@ -157,11 +157,22 @@ def test_conta_do_motorista_leva_o_historico_para_outro_celular(client):
 
     r = client.post("/api/v1/publico/conta", json={"nome": "Ana", "telefone": "(11) 98765-4321", "senha": "123", "dispositivo": celular_a})
     assert r.status_code == 422
+    # Conta nova pede e-mail.
     r = client.post("/api/v1/publico/conta", json={"nome": "Ana", "telefone": "+55 (11) 98765-4321", "senha": "segredo1", "dispositivo": celular_a})
+    assert r.status_code == 422
+    r = client.post(
+        "/api/v1/publico/conta",
+        json={"nome": "Ana", "telefone": "+55 (11) 98765-4321", "email": " Ana@Exemplo.com ", "senha": "segredo1", "dispositivo": celular_a},
+    )
     assert r.status_code == 200, r.text
-    assert r.json()["motorista"]["telefone"] == "11987654321"
-    r = client.post("/api/v1/publico/conta", json={"nome": "Outra", "telefone": "11987654321", "senha": "segredo2"})
+    assert r.json()["motorista"]["telefone"] == "11987654321" and r.json()["motorista"]["email"] == "ana@exemplo.com"
+    r = client.post("/api/v1/publico/conta", json={"nome": "Outra", "telefone": "11987654321", "email": "outra@exemplo.com", "senha": "segredo2"})
     assert r.status_code == 409
+    r = client.post("/api/v1/publico/conta", json={"nome": "Outra", "telefone": "11900000000", "email": "ana@exemplo.com", "senha": "segredo2"})
+    assert r.status_code == 409
+    # Entra com o e-mail tambem (campo "login").
+    assert client.post("/api/v1/publico/entrar", json={"login": "ANA@exemplo.com", "senha": "segredo1"}).status_code == 200
+    assert client.post("/api/v1/publico/entrar", json={"login": "ana@exemplo.com", "senha": "errada"}).status_code == 401
 
     # Entrou no celular B: ve a recarga feita sem conta no A.
     assert client.post("/api/v1/publico/entrar", json={"telefone": "11987654321", "senha": "errada"}).status_code == 401
@@ -181,7 +192,7 @@ def test_conta_do_motorista_leva_o_historico_para_outro_celular(client):
 
 
 def test_login_do_motorista_bloqueia_depois_de_muitas_tentativas(client):
-    client.post("/api/v1/publico/conta", json={"nome": "Beto", "telefone": "21999990000", "senha": "segredo1"})
+    client.post("/api/v1/publico/conta", json={"nome": "Beto", "telefone": "21999990000", "email": "beto@exemplo.com", "senha": "segredo1"})
     for _ in range(5):
         assert client.post("/api/v1/publico/entrar", json={"telefone": "21999990000", "senha": "errada"}).status_code == 401
     assert client.post("/api/v1/publico/entrar", json={"telefone": "21999990000", "senha": "segredo1"}).status_code == 429

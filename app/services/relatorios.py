@@ -13,7 +13,7 @@ from app.services.ocpp_handlers import energia_kwh
 
 FUSO = timedelta(hours=3)
 PERIODOS = ("hoje", "7d", "30d", "mes", "mes_anterior", "personalizado")
-ORIGENS_VENDA = ("caixa", "point", "sumup", "pix")
+ORIGENS_VENDA = ("caixa", "point", "sumup", "pix", "cartao_app", "carteira")
 
 
 def _hoje_br() -> date:
@@ -63,9 +63,19 @@ def _sessoes(db, de: datetime, ate: datetime, ids: list[str]) -> list[SessaoCarg
     return db.query(SessaoCarga).filter(SessaoCarga.inicio >= de, SessaoCarga.inicio < ate, SessaoCarga.carregador_id.in_(ids)).all()
 
 
-def _liquido(venda: Cobranca) -> float:
-    """Valor que ficou: no modo kWh, a sobra devolvida ao motorista sai."""
-    return venda.valor - (venda.valor_devolvido or 0)
+def liquido(venda: Cobranca) -> float:
+    """Faturamento de uma venda: o que ficou. No kWh, a sobra devolvida pelo
+    banco sai; com carteira, conta o pago + o saldo usado menos o que voltou
+    para a carteira (ou seja, a energia usada)."""
+    return (
+        venda.valor
+        + (venda.valor_carteira or 0)
+        - (venda.valor_devolvido or 0)
+        - (venda.valor_creditado or 0)
+    )
+
+
+_liquido = liquido
 
 
 def _somar(vendas: list[Cobranca], sessoes: list[SessaoCarga]) -> dict:

@@ -172,7 +172,8 @@ def test_devolucao_parcial_manda_o_valor_ao_mercado_pago(client, monkeypatch):
     chamadas = []
 
     def mp_falso(method, url, token, body=None, headers=None, timeout=30):
-        chamadas.append((url, body, headers["X-Idempotency-Key"]))
+        if "refund" in url:  # so as devolucoes (outros testes podem ter chamadas no fundo)
+            chamadas.append((url, body, (headers or {}).get("X-Idempotency-Key")))
         return {}
 
     monkeypatch.setattr(pagamentos, "mp_request", mp_falso)
@@ -209,9 +210,10 @@ def test_app_do_motorista_compra_kwh_no_pix(client):
         assert {"kwh": 10, "valor": 20.0} in info["opcoes"]
         r = client.post("/api/v1/publico/pix", json={"carregador_id": "CP-KWH5", "minutos": 30, "dispositivo": "celular-kwh-1"})
         assert r.status_code == 422  # carregador por kWh nao vende minutos
+        # Por kWh precisa de conta (a sobra volta para a carteira).
         r = client.post("/api/v1/publico/pix", json={"carregador_id": "CP-KWH5", "kwh": 15, "dispositivo": "celular-kwh-1"})
-        assert r.status_code == 200, r.text
-        assert r.json()["kwh"] == 15 and r.json()["valor"] == 30.0
+        assert r.status_code == 401
+        assert info["precisa_conta"] is True
 
 
 def test_previsao_de_termino_pela_potencia():

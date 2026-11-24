@@ -4,6 +4,7 @@ from datetime import timedelta
 from app.db.session import SessionLocal
 from app.models.carregador import Cobranca, HistoricoOperacao, SessaoCarga, agora
 from tests.test_fluxo_carga import ADMIN, client  # noqa: F401 - fixture
+from tests.conftest import MP_TESTE
 
 
 def _criar(client, cp_id: str, cliente_id: int, quantas: int) -> None:
@@ -26,7 +27,7 @@ def _criar(client, cp_id: str, cliente_id: int, quantas: int) -> None:
 
 def test_recargas_paginadas_com_filtros(client):
     dono = client.post("/api/v1/admin/usuarios", json={"nome": "Dono Pag", "email": "dono@pag.com", "senha": "segredo1", "role": "cliente"}, headers=ADMIN).json()
-    outro = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Outro Pag", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    outro = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Outro Pag", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
     _criar(client, "CP-PAG", dono["cliente_id"], 30)
     _criar(client, "CP-PAG-OUTRO", outro["id"], 5)
 
@@ -61,7 +62,7 @@ def test_recargas_paginadas_com_filtros(client):
 def test_listas_do_cadastro_paginadas_com_busca(client):
     from tests.test_fluxo_carga import CarregadorFake
 
-    cid = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Rede Lista Zeta", "cliente_mercado_pago": True}, headers=ADMIN).json()["id"]
+    cid = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Rede Lista Zeta", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()["id"]
     for i in range(12):
         client.post("/api/v1/admin/carregadores", json={"id_hardware": f"CP-LST-{i:02d}", "nome_local": f"Posto Lista {i:02d}", "cliente_id": cid}, headers=ADMIN)
 

@@ -6,6 +6,7 @@ from app.models.carregador import Carregador, agora
 from app.models.whatsapp import WhatsappCliente, WhatsappConfig
 from app.services import whatsapp_alertas as wa
 from tests.test_fluxo_carga import ADMIN, CarregadorFake, client  # noqa: F401 - fixture
+from tests.conftest import MP_TESTE
 
 
 def test_avisa_offline_uma_vez_voltou_e_resumo(client, monkeypatch):
@@ -20,7 +21,7 @@ def test_avisa_offline_uma_vez_voltou_e_resumo(client, monkeypatch):
         raise AssertionError(caminho)
 
     monkeypatch.setattr(wa, "_chamar", evolution_falsa)
-    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Rede WA", "telefone": "(11) 98888-7777", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Rede WA", "telefone": "(11) 98888-7777", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-WA", "nome_local": "Posto WA", "cliente_id": cliente["id"]}, headers=ADMIN)
 
     # Ativar sem Evolution configurada e' recusado.
@@ -85,6 +86,6 @@ def test_teste_para_qualquer_numero_contadores_e_clientes_paginados(client, monk
     assert tela["contadores"]["enviados_24h"] >= 1 and "clientes" not in tela
 
     for i in range(3):
-        client.post("/api/v1/admin/clientes", json={"nome_empresa": f"Rede Zap {i}", "telefone": f"(11) 97777-000{i}", "cliente_mercado_pago": True}, headers=ADMIN)
+        client.post("/api/v1/admin/clientes", json={"nome_empresa": f"Rede Zap {i}", "telefone": f"(11) 97777-000{i}", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN)
     pagina = client.get("/api/v1/admin/whatsapp/clientes", params={"busca": "rede zap", "por_pagina": 2}, headers=ADMIN).json()
     assert pagina["total"] == 3 and len(pagina["itens"]) == 2 and pagina["itens"][0]["telefones_validos"] == ["5511977770000"]

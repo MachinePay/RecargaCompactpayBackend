@@ -3,6 +3,7 @@ import httpx
 
 from app.services import geo
 from tests.test_fluxo_carga import ADMIN, client  # noqa: F401 - fixture
+from tests.conftest import MP_TESTE
 
 
 def test_cep_preenche_endereco_e_mapa(client, monkeypatch):
@@ -24,7 +25,7 @@ def test_cep_preenche_endereco_e_mapa(client, monkeypatch):
     assert client.get("/api/v1/admin/cep/123", headers=ADMIN).status_code == 422
     assert client.get("/api/v1/admin/cep/00000000", headers=ADMIN).status_code == 404
 
-    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono CEP", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono CEP", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
     c = client.post(
         "/api/v1/admin/carregadores",
         json={"id_hardware": "CP-CEP", "nome_local": "Paulista", "cliente_id": cliente["id"], "cep": "01310100", "numero_endereco": "1000"},

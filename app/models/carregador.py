@@ -77,12 +77,34 @@ class Motorista(Base):
     sem conta; com conta o historico acompanha a pessoa em qualquer celular."""
     __tablename__ = "motoristas"
     id = Column(Integer, primary_key=True)
-    nome = Column(String, nullable=False)
+    nome = Column(String, index=True, nullable=False)
     # So digitos, com DDD (ex.: 11987654321).
     telefone = Column(String, unique=True, index=True, nullable=False)
+    # Tambem entra com o e-mail (minusculo). Contas antigas podem nao ter.
+    email = Column(String, unique=True, index=True, nullable=True)
     senha_hash = Column(String, nullable=False)
     ativo = Column(Boolean, default=True, nullable=False)
     ultimo_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=agora, nullable=False)
+    # Carteira (services/carteira.py): o que pagou pelo app e nao usou fica
+    # aqui e paga a proxima recarga. So muda junto com um MovimentoCarteira.
+    saldo = Column(Float, nullable=True)
+
+
+class MovimentoCarteira(Base):
+    """Extrato da carteira do motorista. valor > 0 entra, < 0 sai; saldo_apos
+    e' o saldo logo depois (o extrato bate sozinho)."""
+    __tablename__ = "carteira_movimentos"
+    __table_args__ = (Index("ix_carteira_motorista_id_desc", "motorista_id", "id"),)
+    id = Column(Integer, primary_key=True)
+    motorista_id = Column(Integer, ForeignKey("motoristas.id"), nullable=False)
+    # reserva (separa para uma recarga), sobra (volta o que nao usou),
+    # devolucao (recarga nao comecou), ajuste (painel)
+    tipo = Column(String, nullable=False)
+    valor = Column(Float, nullable=False)
+    saldo_apos = Column(Float, nullable=False)
+    descricao = Column(Text, nullable=False)
+    cobranca_id = Column(Integer, index=True, nullable=True)
     created_at = Column(DateTime, default=agora, nullable=False)
 
 
@@ -142,6 +164,10 @@ class Carregador(Base):
     # usado e devolve a sobra. Ex.: 80 -> R$ 10 a R$ 2/kWh para em 4 kWh; no
     # app, 10 kWh viram um Pix de R$ 25. Vazio = 100.
     kwh_percentual_entrega = Column(Integer, nullable=True)
+    # Modo kWh, maquininha no CARTAO: o banco nao devolve parte de venda de
+    # cartao na maquininha, entao nao ha devolucao. Converte este % (margem
+    # pequena para nao ficar devendo energia) e nada volta. Vazio = 95.
+    kwh_percentual_cartao_maquina = Column(Integer, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     # Excluido pelo painel mas com vendas no historico: some das telas e recusa
     # a conexao, e as vendas antigas continuam nos relatorios.
@@ -238,6 +264,14 @@ class Cobranca(Base):
     # estorno do valor inteiro.
     valor_consumido = Column(Float, nullable=True)
     valor_devolvido = Column(Float, nullable=True)
+    # Recarga pelo app com carteira: valor e' o que o banco cobrou agora (Pix
+    # ou cartao) e valor_carteira o saldo usado. A sobra volta para a carteira
+    # (valor_creditado), nao para o banco.
+    carteira = Column(Boolean, nullable=True)
+    valor_carteira = Column(Float, nullable=True)
+    valor_creditado = Column(Float, nullable=True)
+    # Cartao no app (origem cartao_app): bandeira e final, para o motorista reconhecer.
+    cartao_final = Column(String, nullable=True)
 
 
 class SessaoCarga(Base):

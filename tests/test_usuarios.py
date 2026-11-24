@@ -4,6 +4,7 @@ from datetime import timedelta
 from app.db.session import SessionLocal
 from app.models.carregador import HistoricoOperacao, agora
 from tests.test_fluxo_carga import ADMIN, CarregadorFake, client  # noqa: F401 - fixture
+from tests.conftest import MP_TESTE
 
 
 def _entrar(client, email, senha):
@@ -12,8 +13,8 @@ def _entrar(client, email, senha):
 
 
 def test_cliente_ve_so_os_proprios_carregadores_e_nao_administra(client):
-    a = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono A", "cliente_mercado_pago": True}, headers=ADMIN).json()
-    b = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono B", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    a = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono A", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
+    b = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono B", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-DONO-A", "nome_local": "A", "cliente_id": a["id"]}, headers=ADMIN)
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-DONO-B", "nome_local": "B", "cliente_id": b["id"]}, headers=ADMIN)
 
@@ -51,7 +52,7 @@ def test_cliente_ve_so_os_proprios_carregadores_e_nao_administra(client):
 
 
 def test_quedas_e_saude(client):
-    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono Q", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono Q", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-QUEDA2", "nome_local": "Q", "cliente_id": cliente["id"]}, headers=ADMIN)
     momento = agora()
     db = SessionLocal()
@@ -74,7 +75,7 @@ def test_quedas_e_saude(client):
 
 
 def test_excluir_carregador_apaga_ou_arquiva(client):
-    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono Ex", "cliente_mercado_pago": True}, headers=ADMIN).json()
+    cliente = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono Ex", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
     novo = {"nome_local": "Ex", "cliente_id": cliente["id"]}
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-EX-VAZIO", **novo}, headers=ADMIN)
     client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-EX-VENDEU", **novo}, headers=ADMIN)
@@ -114,7 +115,7 @@ def test_excluir_carregador_apaga_ou_arquiva(client):
 def test_cadastro_do_cliente_cria_o_login(client):
     c = client.post(
         "/api/v1/admin/clientes",
-        json={"nome_empresa": "Dono Login", "cliente_mercado_pago": True, "acesso_email": "Dono@Login.com", "acesso_senha": "segredo1"},
+        json={"nome_empresa": "Dono Login", "cliente_mercado_pago": True, **MP_TESTE, "acesso_email": "Dono@Login.com", "acesso_senha": "segredo1"},
         headers=ADMIN,
     ).json()
     assert c["acessos"] == ["dono@login.com"]

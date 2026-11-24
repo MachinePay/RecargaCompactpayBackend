@@ -165,6 +165,14 @@ def aprovar_cobranca(db, cobranca_id: int, payment_id: str | None = None, metodo
         cobranca.pago_em = agora()
         cobranca.mp_payment_id = payment_id
         cobranca.metodo = metodo
+        if cobranca.origem == "point" and cobranca.kwh and cobranca.pacote_id:
+            # Pacote do tablet pago no cartao: so o % do cartao vira energia (sem devolucao).
+            from app.services import cobranca_kwh
+
+            pacote = db.get(PacoteTempo, cobranca.pacote_id)
+            carregador = db.get(Carregador, cobranca.carregador_id)
+            if pacote is not None and pacote.kwh and not cobranca_kwh.eh_pix(metodo):
+                cobranca.kwh = int(pacote.kwh * cobranca_kwh.percentual_cartao_maquina(carregador) + 1e-9) / 100
         registrar_historico(
             db,
             cobranca.carregador_id,
@@ -173,13 +181,17 @@ def aprovar_cobranca(db, cobranca_id: int, payment_id: str | None = None, metodo
             valor=cobranca.valor,
         )
         db.commit()
+    if cobranca.carteira:
+        from app.services import carteira  # carteira importa ocpp_handlers
+
+        carteira.garantir_reserva_ao_aprovar(db, cobranca)
     sessoes.iniciar_sessao_para_cobranca(db, cobranca)
     return True
 
 
 def consultar_order(db, cobranca: Cobranca) -> None:
     """Reconsulta a order no MP e aplica o resultado na cobranca."""
-    if cobranca.origem == "pix":
+    if cobranca.origem in ("pix", "cartao_app"):
         from app.services import pix  # pix importa este modulo
 
         pix.consultar(db, cobranca)
@@ -230,7 +242,7 @@ def processar_webhook(dados: dict) -> None:
     try:
         if tipo == "payment" or acao.startswith("payment."):
             # Pix do app do motorista: a cobranca ja tem o payment_id.
-            pix = db.query(Cobranca).filter(Cobranca.mp_payment_id == order_id, Cobranca.origem == "pix").first()
+            pix = db.query(Cobranca).filter(Cobranca.mp_payment_id == order_id, Cobranca.origem.in_(("pix", "cartao_app"))).first()
             if pix is not None:
                 consultar_order(db, pix)
                 return
@@ -271,7 +283,15 @@ def cancelar_cobranca(db, cobranca: Cobranca) -> bool:
             return False
     cobranca.status = "cancelada"
     db.commit()
+    _devolver_reserva(db, cobranca)
     return True
+
+
+def _devolver_reserva(db, cobranca: Cobranca) -> None:
+    if cobranca.carteira and cobranca.valor_carteira:
+        from app.services import carteira
+
+        carteira.devolver_reserva(db, cobranca)
 
 
 def _reembolsar(db, cobranca: Cobranca, valor: float | None, chave: str) -> str | None:
@@ -312,7 +332,18 @@ def _reembolsar(db, cobranca: Cobranca, valor: float | None, chave: str) -> str 
 
 
 def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
-    """Estorna o valor inteiro (ou o que ainda nao foi devolvido)."""
+    """Estorna o valor inteiro (ou o que ainda nao foi devolvido). Recarga do
+    app com carteira: tudo volta para a carteira, nao para o banco."""
+    if cobranca is not None and cobranca.carteira:
+        if cobranca.estornada_em or cobranca.status != "aprovada":
+            return False
+        from app.services import carteira
+
+        carteira.devolver_tudo(db, cobranca)
+        cobranca.estornada_em = agora()
+        registrar_historico(db, cobranca.carregador_id, "PAGAMENTO", f"Cobranca {cobranca.id} devolvida a carteira do motorista", valor=carteira.total_da_recarga(cobranca))
+        db.commit()
+        return True
     if cobranca is None or cobranca.estornada_em or cobranca.status != "aprovada" or cobranca.valor <= 0:
         return False
     ja_devolvido = cobranca.valor_devolvido or 0
@@ -388,6 +419,9 @@ def processar_cobrancas_pendentes_uma_vez() -> None:
                     if cancelar_cobranca(db, cobranca):
                         cobranca.status = "expirada"
                         db.commit()
+                # Pix/cartao recusado ou vencido: o saldo separado volta.
+                if cobranca.status not in ("aguardando_pagamento", "aprovada"):
+                    _devolver_reserva(db, cobranca)
             except Exception:
                 db.rollback()
                 logging.exception("Erro consultando cobranca %s", cobranca.id)

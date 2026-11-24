@@ -277,7 +277,9 @@ def registrar_pagamento(
             return None  # webhook repetido (payment.created + payment.updated)
         from app.services import cobranca_kwh  # importa ocpp_handlers
 
-        kwh = cobranca_kwh.kwh_por_valor(carregador, valor) if cobranca_kwh.cobra_por_kwh(carregador) else None
+        # Pix na maquininha: o % cadastrado e devolve a sobra. Cartao: 95%
+        # (padrao) e nao devolve (o banco nao estorna parte de cartao).
+        kwh = cobranca_kwh.kwh_por_valor(carregador, valor, metodo) if cobranca_kwh.cobra_por_kwh(carregador) else None
         if kwh is not None:
             # Modo kWh: o valor vira energia; o tempo e' so o teto de seguranca.
             minutos = cobranca_kwh.teto_minutos(carregador) if kwh >= 0.01 else 0
