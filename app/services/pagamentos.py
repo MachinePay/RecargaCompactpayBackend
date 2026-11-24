@@ -331,6 +331,16 @@ def _reembolsar(db, cobranca: Cobranca, valor: float | None, chave: str) -> str 
     return None
 
 
+def _avisar_dono(cobranca: Cobranca, valor: float, erro: str) -> None:
+    """Estorno recusado pelo banco: avisa o dono no WhatsApp (se ligado)."""
+    try:
+        from app.services import whatsapp_alertas  # importa relatorios/ocpp
+
+        whatsapp_alertas.avisar_estorno_falhou(cobranca.id, round(valor, 2), erro)
+    except Exception:
+        logging.exception("Nao deu para avisar o estorno da cobranca %s", cobranca.id)
+
+
 def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
     """Estorna o valor inteiro (ou o que ainda nao foi devolvido). Recarga do
     app com carteira: tudo volta para a carteira, nao para o banco."""
@@ -355,6 +365,7 @@ def estornar_cobranca(db, cobranca: Cobranca | None) -> bool:
         erro = _reembolsar(db, cobranca, None, f"refund-{cobranca.external_reference}")
     if erro:
         cobranca.estorno_erro = erro
+        _avisar_dono(cobranca, cobranca.valor - (cobranca.valor_devolvido or 0), erro)
         banco = "no app da SumUp" if cobranca.origem == "sumup" else "no Mercado Pago"
         registrar_historico(
             db,
@@ -387,6 +398,7 @@ def devolver_parte(db, cobranca: Cobranca, valor: float) -> bool:
     erro = _reembolsar(db, cobranca, valor, f"devolve-{cobranca.external_reference}")
     if erro:
         cobranca.estorno_erro = erro
+        _avisar_dono(cobranca, valor, erro)
         registrar_historico(
             db,
             cobranca.carregador_id,

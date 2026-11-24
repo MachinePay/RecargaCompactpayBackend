@@ -28,6 +28,7 @@ class ConfigDados(BaseModel):
     mensagem_lembrete: str | None = None
     mensagem_voltou: str | None = None
     mensagem_resumo: str | None = None
+    mensagem_estorno: str | None = None
 
 
 class ClienteEscolha(BaseModel):

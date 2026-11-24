@@ -89,3 +89,53 @@ def test_teste_para_qualquer_numero_contadores_e_clientes_paginados(client, monk
         client.post("/api/v1/admin/clientes", json={"nome_empresa": f"Rede Zap {i}", "telefone": f"(11) 97777-000{i}", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN)
     pagina = client.get("/api/v1/admin/whatsapp/clientes", params={"busca": "rede zap", "por_pagina": 2}, headers=ADMIN).json()
     assert pagina["total"] == 3 and len(pagina["itens"]) == 2 and pagina["itens"][0]["telefones_validos"] == ["5511977770000"]
+
+
+def test_offline_vai_para_todo_dono_e_estorno_recusado_avisa(client, monkeypatch):
+    from app.models.carregador import Cobranca
+    from app.services import pagamentos
+
+    enviados = []
+
+    def evolution_falsa(config, caminho, method="GET", body=None):
+        if caminho.startswith("/instance/connectionState/"):
+            return {"instance": {"state": "open"}}
+        if caminho.startswith("/message/sendText/"):
+            enviados.append((body["number"], body["text"]))
+            return {}
+        raise AssertionError(caminho)
+
+    monkeypatch.setattr(wa, "_chamar", evolution_falsa)
+    client.put(
+        "/api/v1/admin/whatsapp/config",
+        json={"evolution_url": "https://evo.exemplo", "api_key": "chave-1234567", "instancia": "gk", "ativo": True, "minutos_offline": 30},
+        headers=ADMIN,
+    )
+    # Dono sem nada marcado na tela WhatsApp: recebe o aviso de queda mesmo assim.
+    dono = client.post("/api/v1/admin/clientes", json={"nome_empresa": "Dono Sempre", "telefone": "(31) 98888-1111", "cliente_mercado_pago": True, **MP_TESTE}, headers=ADMIN).json()
+    client.post("/api/v1/admin/carregadores", json={"id_hardware": "CP-SEMPRE", "nome_local": "Posto Sempre", "cliente_id": dono["id"]}, headers=ADMIN)
+    db = SessionLocal()
+    try:
+        db.get(WhatsappConfig, 1).ativado_em = agora() - timedelta(hours=2)
+        db.get(Carregador, "CP-SEMPRE").ultimo_sinal = agora() - timedelta(minutes=45)
+        db.commit()
+        wa.verificar_e_enviar(db)
+        assert any(numero == "5531988881111" and "Posto Sempre" in texto for numero, texto in enviados)
+
+        # Estorno recusado pelo banco: o dono fica sabendo no WhatsApp.
+        def mp_recusa(*args, **kwargs):
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=502, detail="refund not allowed")
+
+        monkeypatch.setattr(pagamentos, "mp_request", mp_recusa)
+        monkeypatch.setattr(wa, "avisar_estorno_falhou", lambda cobranca_id, valor, motivo: wa._avisar_estorno(cobranca_id, valor, motivo))
+        cobranca = Cobranca(carregador_id="CP-SEMPRE", minutos=30, valor=15, origem="caixa", metodo="pix", status="aprovada",
+                            external_reference="EV:CP-SEMPRE:estorno", mp_payment_id="555", pago_em=agora())
+        db.add(cobranca)
+        db.commit()
+        assert not pagamentos.estornar_cobranca(db, cobranca)
+        aviso = enviados[-1]
+        assert aviso[0] == "5531988881111" and "R$ 15,00" in aviso[1] and "refund not allowed" in aviso[1]
+    finally:
+        db.close()

@@ -839,6 +839,8 @@ def _serializar_sessoes(db: Session, lista: list[SessaoCarga]) -> list[dict]:
                 "metodo": cobranca.metodo if cobranca else None,
                 "estornada": bool(cobranca and cobranca.estornada_em),
                 "estorno_erro": bool(cobranca and cobranca.estorno_erro and not cobranca.estornada_em),
+                # Cartao na maquininha que carregou: sem botao Estornar (nao ha estorno de cartao aqui).
+                "estorno_manual": not (cobranca_kwh.cartao_na_maquina(cobranca) and sessao.status != "falhou"),
             }
         )
     return resposta
@@ -1411,6 +1413,8 @@ def estornar_sessao(sessao_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail="Recarga sem pagamento para estornar")
     if cobranca.estornada_em is not None:
         raise HTTPException(status_code=409, detail="Ja foi estornada")
+    if cobranca_kwh.cartao_na_maquina(cobranca) and sessao.status != "falhou":
+        raise HTTPException(status_code=409, detail="Pagamento no cartao da maquininha nao tem estorno pelo painel")
     if not pagamentos.estornar_cobranca(db, cobranca):
         db.refresh(cobranca)
         raise HTTPException(status_code=502, detail=cobranca.estorno_erro or "O banco recusou o estorno")

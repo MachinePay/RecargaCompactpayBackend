@@ -23,6 +23,7 @@ class WhatsappConfig(Base):
     mensagem_lembrete = Column(Text, nullable=True)
     mensagem_voltou = Column(Text, nullable=True)
     mensagem_resumo = Column(Text, nullable=True)
+    mensagem_estorno = Column(Text, nullable=True)
     # Quando foi ativado: carregador que ja estava offline antes nao dispara
     # (evita uma rajada de avisos antigos ao ligar o envio).
     ativado_em = Column(DateTime, nullable=True)

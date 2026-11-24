@@ -3,7 +3,9 @@
 o que recebe:
 
 - offline: carregador sem conexao por mais de X minutos (padrao 30). Os do
-  mesmo cliente que cairam juntos vao numa mensagem so.
+  mesmo cliente que cairam juntos vao numa mensagem so. Vai SEMPRE para o
+  dono (telefone do cadastro do cliente), sem precisar marcar na tela.
+- estorno: o banco recusou devolver um pagamento (o dono precisa devolver na mao).
 - lembrete: se continuar offline, novo aviso a cada X horas (padrao 24).
 - voltou: quando o carregador avisado reconecta.
 - resumo diario: faturamento, recargas e energia do dia, no horario escolhido.
@@ -45,6 +47,13 @@ PADROES = {
         "Se já está resolvendo, pode desconsiderar."
     ),
     "voltou": "✅ *CompactRecarga*\n\nVoltaram a ficar online ({quantidade}):\n{carregadores}",
+    "estorno": (
+        "❗ *CompactRecarga* | Estorno nao realizado\n\n"
+        "Olá, {cliente}!\n\n"
+        "O banco recusou devolver *{valor}* de uma recarga em *{carregador}* ({quando}).\n"
+        "Motivo: {motivo}\n\n"
+        "Devolva pelo app do banco ({banco}) ou pelo painel, em Recargas."
+    ),
     "resumo": (
         "📊 *CompactRecarga* | Resumo de {data}\n\n"
         "Olá, {cliente}!\n\n"
@@ -57,6 +66,7 @@ VARIAVEIS = {
     "offline": ["cliente", "quantidade", "carregadores"],
     "lembrete": ["cliente", "quantidade", "carregadores"],
     "voltou": ["cliente", "quantidade", "carregadores"],
+    "estorno": ["cliente", "carregador", "valor", "quando", "motivo", "banco"],
     "resumo": ["cliente", "data", "carregadores", "total", "vendas", "recargas", "energia"],
 }
 _CAMPO_MENSAGEM = {tipo: f"mensagem_{tipo}" for tipo in PADROES}
@@ -362,7 +372,8 @@ def verificar_e_enviar(db, momento: datetime | None = None) -> dict:
 def _ciclo(db, config, momento, resultado) -> None:
     escolhas = {e.cliente_id: e for e in db.query(WhatsappCliente).all()}
     abertos = db.query(WhatsappOfflineAviso).filter(WhatsappOfflineAviso.resolvido_em.is_(None)).all()
-    if not any(e.ativo or e.resumo_diario for e in escolhas.values()) and not abertos:
+    tem_dono_com_telefone = db.query(Cliente.id).filter(Cliente.telefone.isnot(None), Cliente.telefone != "").first() is not None
+    if not tem_dono_com_telefone and not any(e.ativo or e.resumo_diario for e in escolhas.values()) and not abertos:
         resultado["pulado"] = "sem_clientes"
         return
     try:
@@ -401,7 +412,7 @@ def _avisar_voltou(db, config, momento, escolhas, abertos, por_id, resultado) ->
         if _online(carregador):
             aviso.resolvido_em = momento
             escolha = escolhas.get(carregador.cliente_id)
-            if escolha and escolha.ativo and escolha.recebe_voltou:
+            if escolha and escolha.recebe_voltou:
                 grupos.setdefault(carregador.cliente_id, []).append((carregador, aviso.offline_desde))
         elif carregador.ultimo_sinal and carregador.ultimo_sinal > aviso.offline_desde:
             aviso.resolvido_em = momento  # voltou e caiu de novo entre dois ciclos: outra queda
@@ -415,7 +426,8 @@ def _avisar_voltou(db, config, momento, escolhas, abertos, por_id, resultado) ->
 
 def _avisar_quedas(db, config, momento, escolhas, carregadores, resultado) -> None:
     limite = timedelta(minutes=config.minutos_offline or 30)
-    candidatos = [c for c in carregadores if c.ultimo_sinal and escolhas.get(c.cliente_id) and escolhas[c.cliente_id].ativo]
+    # Todo dono com telefone recebe o aviso de queda (nao depende da tela).
+    candidatos = [c for c in carregadores if c.ultimo_sinal and c.cliente is not None and telefones_do_cliente(c.cliente)]
     if not candidatos:
         return
     ja_avisados = set(
@@ -429,9 +441,8 @@ def _avisar_quedas(db, config, momento, escolhas, carregadores, resultado) -> No
             continue
         if momento - carregador.ultimo_sinal < limite:
             continue
-        # Ja estava offline antes de ligar o aviso (geral ou do cliente): nao manda.
-        escolha = escolhas[carregador.cliente_id]
-        ativado_em = max(filter(None, [config.ativado_em, escolha.ativado_em]), default=None)
+        # Ja estava offline antes de ligar o envio: nao manda (evita rajada de avisos antigos).
+        ativado_em = config.ativado_em
         if ativado_em and carregador.ultimo_sinal + limite < ativado_em:
             continue
         grupos.setdefault(carregador.cliente_id, []).append((carregador, carregador.ultimo_sinal))
@@ -457,7 +468,7 @@ def _avisar_lembretes(db, config, momento, escolhas, abertos, por_id, resultado)
             continue
         carregador = por_id.get(aviso.carregador_id)
         escolha = escolhas.get(carregador.cliente_id) if carregador else None
-        if not escolha or not (escolha.ativo and escolha.recebe_lembrete) or _online(carregador):
+        if not escolha or not escolha.recebe_lembrete or _online(carregador):
             continue
         if momento - (aviso.ultimo_lembrete_em or aviso.avisado_em) < intervalo:
             continue
@@ -493,6 +504,47 @@ def _enviar_resumos(db, config, momento, escolhas, resultado) -> None:
         db.commit()
         if _enviar_para_cliente(db, config, cliente, "resumo", texto, ids):
             resultado["resumo"] += 1
+
+
+# ---- Estorno que falhou ------------------------------------------------------
+
+def avisar_estorno_falhou(cobranca_id: int, valor: float, motivo: str) -> None:
+    """Avisa o dono do carregador que o banco recusou um estorno. Roda numa
+    thread (nao segura o pagamento/OCPP esperando o WhatsApp)."""
+    threading.Thread(target=_avisar_estorno, args=(cobranca_id, valor, motivo), daemon=True).start()
+
+
+def _avisar_estorno(cobranca_id: int, valor: float, motivo: str) -> None:
+    from app.models.carregador import Cobranca  # evita ciclo na importacao
+
+    db = SessionLocal()
+    try:
+        config = obter_config(db)
+        if not config.ativo or not configurado(config):
+            return
+        cobranca = db.get(Cobranca, cobranca_id)
+        carregador = db.get(Carregador, cobranca.carregador_id) if cobranca else None
+        cliente = carregador.cliente if carregador else None
+        if cliente is None or not telefones_do_cliente(cliente):
+            return
+        quando = ((cobranca.pago_em or cobranca.created_at) - FUSO).strftime("%d/%m %H:%M")
+        texto = montar_mensagem(
+            modelo_mensagem(config, "estorno"),
+            {
+                "cliente": cliente.nome_empresa,
+                "carregador": carregador.nome_local,
+                "valor": formatar_moeda(valor),
+                "quando": quando,
+                "motivo": (motivo or "sem detalhe")[:200],
+                "banco": "SumUp" if cobranca.origem == "sumup" else "Mercado Pago",
+            },
+        )
+        _enviar_para_cliente(db, config, cliente, "estorno", texto, [carregador.id_hardware])
+    except Exception:
+        logging.exception("[whatsapp] aviso de estorno falhou")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _rodar() -> None:

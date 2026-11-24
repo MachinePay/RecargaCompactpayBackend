@@ -137,6 +137,12 @@ def percentual_da_maquina(carregador: Carregador, metodo: str | None) -> int:
     return percentual_entrega(carregador) if eh_pix(metodo) else percentual_cartao_maquina(carregador)
 
 
+def cartao_na_maquina(cobranca: Cobranca | None) -> bool:
+    """Venda no cartao numa maquininha: nao tem estorno pelo painel (so o
+    automatico, inteiro, quando a recarga nem comeca)."""
+    return cobranca is not None and cobranca.origem in ORIGENS_MAQUININHA and not eh_pix(cobranca.metodo)
+
+
 def devolve_no_banco(cobranca: Cobranca) -> bool:
     """A sobra volta pelo banco? Carteira: nao (volta para a carteira).
     Maquininha: so no Pix (cartao na maquininha nao tem estorno parcial)."""
