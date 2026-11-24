@@ -28,27 +28,27 @@ def _carregar(cp, cobranca: dict, kwh_usados: float) -> int:
 
 
 def test_pix_do_app_sem_conta_devolve_a_sobra_no_pix(client):
-    _carregador(client, "CP-APP1", kwh_percentual_entrega=80)
+    _carregador(client, "CP-APP1")
     with client.websocket_connect("/ocpp/CP-APP1", subprotocols=["ocpp1.6"]) as ws:
         cp = CarregadorFake(ws)
         cp.ligar()
         info = client.get("/api/v1/publico/carregadores/CP-APP1").json()
         assert info["precisa_conta"] is False
-        # 10 kWh a R$ 2,00 com 80%: energia R$ 20 + reserva R$ 5 = R$ 25.
+        # 10 kWh a R$ 2,00: energia R$ 20 + reserva do Pix R$ 2 = R$ 22.
         previa = client.post("/api/v1/publico/recarga/previa", json={"carregador_id": "CP-APP1", "kwh": 10}).json()
-        assert (previa["custo_energia"], previa["reserva"], previa["a_pagar"]) == (20, 5, 25)
-        r = client.post("/api/v1/publico/recarga", json={"carregador_id": "CP-APP1", "kwh": 10, "metodo": "pix", "dispositivo": CELULAR, "a_pagar": 25})
+        assert (previa["custo_energia"], previa["reserva"], previa["a_pagar"]) == (20, 2, 22)
+        r = client.post("/api/v1/publico/recarga", json={"carregador_id": "CP-APP1", "kwh": 10, "metodo": "pix", "dispositivo": CELULAR, "a_pagar": 22})
         assert r.status_code == 200, r.text
-        assert r.json()["carteira"] is False and r.json()["valor"] == 25
+        assert r.json()["carteira"] is False and r.json()["valor"] == 22
         pago = client.post(f"/api/v1/publico/cobrancas/{r.json()['id']}/simular-pagamento", params={"dispositivo": CELULAR}).json()
 
-        # Usou 4 kWh = R$ 8: R$ 17 voltam no proprio Pix.
+        # Usou 4 kWh = R$ 8: R$ 14 voltam no proprio Pix.
         sessao_id = _carregar(cp, pago, 4)
     cobranca = _cobranca_da_sessao(sessao_id)
-    assert (cobranca.valor_consumido, cobranca.valor_devolvido, cobranca.valor_creditado) == (8.0, 17.0, None)
+    assert (cobranca.valor_consumido, cobranca.valor_devolvido, cobranca.valor_creditado) == (8.0, 14.0, None)
 
 
-def test_cartao_do_app_usa_95_e_nao_devolve(client, monkeypatch):
+def test_cartao_do_app_reserva_50_centavos_e_nao_devolve(client, monkeypatch):
     _carregador(client, "CP-APP2")
     with client.websocket_connect("/ocpp/CP-APP2", subprotocols=["ocpp1.6"]) as ws:
         cp = CarregadorFake(ws)
@@ -56,12 +56,12 @@ def test_cartao_do_app_usa_95_e_nao_devolve(client, monkeypatch):
         # Preco mudou entre a previa e o pagamento: nao cobra outro valor.
         r = client.post("/api/v1/publico/recarga", json={"carregador_id": "CP-APP2", "kwh": 10, "metodo": "cartao", "dispositivo": CELULAR, "a_pagar": 13})
         assert r.status_code == 409
-        # Cartao: 10 kWh a R$ 2,00 com 95% = R$ 21,05 (sem devolucao).
+        # Cartao: 10 kWh a R$ 2,00 + R$ 0,50 de reserva = R$ 20,50 (sem devolucao).
         previa = client.post("/api/v1/publico/recarga/previa", json={"carregador_id": "CP-APP2", "kwh": 10}).json()
-        assert previa["cartao"]["a_pagar"] == 21.05 and previa["cartao"]["devolve_sobra"] is False
-        r = client.post("/api/v1/publico/recarga", json={"carregador_id": "CP-APP2", "kwh": 10, "metodo": "cartao", "dispositivo": CELULAR, "a_pagar": 21.05})
+        assert previa["cartao"]["a_pagar"] == 20.5 and previa["cartao"]["devolve_sobra"] is False
+        r = client.post("/api/v1/publico/recarga", json={"carregador_id": "CP-APP2", "kwh": 10, "metodo": "cartao", "dispositivo": CELULAR, "a_pagar": 20.5})
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "aprovada" and r.json()["valor"] == 21.05 and r.json()["forma"] == "cartao"
+        assert r.json()["status"] == "aprovada" and r.json()["valor"] == 20.5 and r.json()["forma"] == "cartao"
         sessao_id = _carregar(cp, r.json(), 7.5)
     cobranca = _cobranca_da_sessao(sessao_id)
     # Usou 7,5 kWh = R$ 15, mas cartao nao tem devolucao.
@@ -90,12 +90,12 @@ def test_devolucao_do_cartao_do_app_vai_no_payment(client, monkeypatch):
         db.close()
 
 
-def test_maquininha_cartao_converte_95_e_nao_devolve(client):
-    _carregador(client, "CP-APP4", kwh_percentual_entrega=80)
+def test_maquininha_cartao_reserva_50_centavos_e_nao_devolve(client):
+    _carregador(client, "CP-APP4")
     with client.websocket_connect("/ocpp/CP-APP4", subprotocols=["ocpp1.6"]) as ws:
         cp = CarregadorFake(ws)
         cp.ligar()
-        # Cartao: R$ 10 x 95% / R$ 2,00 = 4,75 kWh (no Pix seriam 4 kWh, 80%).
+        # Cartao: (R$ 10 - R$ 0,50) / R$ 2,00 = 4,75 kWh (no Pix seriam 4 kWh: R$ 2 de reserva).
         simulado = client.post("/api/v1/admin/carregadores/CP-APP4/simular-pagamento", json={"valor": 10, "metodo": "cartao"}, headers=ADMIN).json()
         assert simulado["kwh"] == 4.75
         start = cp.receber_chamada("RemoteStartTransaction")

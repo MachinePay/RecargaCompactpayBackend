@@ -100,7 +100,7 @@ def criar_cobranca(db, carregador: Carregador, pacote: PacoteTempo, origem: str 
 
     # Pacote de energia: entrega o percentual (margem) e cobra o usado pelo
     # preco do pacote.
-    kwh = cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh) if pacote.kwh else None
+    kwh = cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh, pacote.valor) if pacote.kwh else None
     minutos = cobranca_kwh.teto_minutos(carregador) if kwh else pacote.minutos
     compra = f"{kwh:g} kWh" if kwh else f"{pacote.minutos} min"
     cobranca = Cobranca(
@@ -166,13 +166,13 @@ def aprovar_cobranca(db, cobranca_id: int, payment_id: str | None = None, metodo
         cobranca.mp_payment_id = payment_id
         cobranca.metodo = metodo
         if cobranca.origem == "point" and cobranca.kwh and cobranca.pacote_id:
-            # Pacote do tablet pago no cartao: so o % do cartao vira energia (sem devolucao).
+            # Pacote do tablet pago no cartao: reserva do cartao (sem devolucao).
             from app.services import cobranca_kwh
 
             pacote = db.get(PacoteTempo, cobranca.pacote_id)
             carregador = db.get(Carregador, cobranca.carregador_id)
             if pacote is not None and pacote.kwh and not cobranca_kwh.eh_pix(metodo):
-                cobranca.kwh = int(pacote.kwh * cobranca_kwh.percentual_cartao_maquina(carregador) + 1e-9) / 100
+                cobranca.kwh = cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh, pacote.valor, metodo)
         registrar_historico(
             db,
             cobranca.carregador_id,

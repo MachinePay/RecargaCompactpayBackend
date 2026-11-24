@@ -129,8 +129,9 @@ class CarregadorUpdate(BaseModel):
     preco_kwh: float | None = Field(default=None, gt=0, le=50)
     kwh_tempo_maximo_min: int | None = Field(default=None, ge=10, le=24 * 60)
     devolver_sobra: bool | None = None
-    kwh_percentual_entrega: int | None = Field(default=None, ge=50, le=100)
-    kwh_percentual_cartao_maquina: int | None = Field(default=None, ge=50, le=100)
+    # Reserva fixa em R$ (vazio = padrao: Pix 2,00 / cartao 0,50).
+    kwh_reserva_pix: float | None = Field(default=None, ge=0, le=100)
+    kwh_reserva_cartao: float | None = Field(default=None, ge=0, le=100)
 
 
 class ClienteDados(BaseModel):
@@ -306,9 +307,10 @@ def _serializar_carregador(carregador: Carregador) -> dict:
         "kwh_tempo_maximo_min": carregador.kwh_tempo_maximo_min,
         "kwh_tempo_maximo_padrao": settings.KWH_TEMPO_MAXIMO_MINUTOS,
         "devolver_sobra": carregador.devolver_sobra is not False,
-        "kwh_percentual_entrega": carregador.kwh_percentual_entrega,
-        "kwh_percentual_cartao_maquina": carregador.kwh_percentual_cartao_maquina,
-        "kwh_percentual_cartao_padrao": cobranca_kwh.PERCENTUAL_CARTAO_MAQUINA_PADRAO,
+        "kwh_reserva_pix": carregador.kwh_reserva_pix,
+        "kwh_reserva_cartao": carregador.kwh_reserva_cartao,
+        "kwh_reserva_pix_padrao": cobranca_kwh.RESERVA_PIX_PADRAO,
+        "kwh_reserva_cartao_padrao": cobranca_kwh.RESERVA_CARTAO_PADRAO,
         "mp_store_id": carregador.mp_store_id,
         "mp_store_external_id": carregador.mp_store_external_id,
         "mp_pos_id": carregador.mp_pos_id,
@@ -354,8 +356,8 @@ def criar_carregador(dados: CarregadorCreate, db: Session = Depends(get_db)):
         carregador = existente
         for campo in ("mp_user_id", "mp_store_id", "mp_store_external_id", "mp_pos_id", "mp_pos_external_id",
                       "preco_valor", "preco_minutos", "modo_cobranca", "preco_kwh",
-                      "kwh_tempo_maximo_min", "devolver_sobra", "kwh_percentual_entrega",
-                      "kwh_percentual_cartao_maquina", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
+                      "kwh_tempo_maximo_min", "devolver_sobra", "kwh_reserva_pix",
+                      "kwh_reserva_cartao", "cep", "endereco", "latitude", "longitude", "ocpp_senha_hash"):
             setattr(carregador, campo, None)
         for campo, valor in campos.items():
             setattr(carregador, campo, valor)

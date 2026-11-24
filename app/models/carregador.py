@@ -171,6 +171,11 @@ class Carregador(Base):
     # cartao na maquininha, entao nao ha devolucao. Converte este % (margem
     # pequena para nao ficar devendo energia) e nada volta. Vazio = 95.
     kwh_percentual_cartao_maquina = Column(Integer, nullable=True)
+    # (Os dois % acima foram trocados pela reserva fixa abaixo e nao sao mais usados.)
+    # Modo kWh: reserva fixa em R$ somada ao custo da energia. Pix: a sobra
+    # volta (padrao R$ 2,00). Cartao: nao tem devolucao (padrao R$ 0,50).
+    kwh_reserva_pix = Column(Float, nullable=True)
+    kwh_reserva_cartao = Column(Float, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     # Excluido pelo painel mas com vendas no historico: some das telas e recusa
     # a conexao, e as vendas antigas continuam nos relatorios.

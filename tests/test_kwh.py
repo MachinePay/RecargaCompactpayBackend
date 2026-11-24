@@ -11,7 +11,8 @@ def _carregador_kwh(client, cp_id: str) -> tuple[int, dict]:
     # Sem preco do kWh o painel nao deixa trocar de modo.
     r = client.patch(f"/api/v1/admin/carregadores/{cp_id}", json={"modo_cobranca": "kwh"}, headers=ADMIN)
     assert r.status_code == 422
-    r = client.patch(f"/api/v1/admin/carregadores/{cp_id}", json={"modo_cobranca": "kwh", "preco_kwh": 2.0}, headers=ADMIN)
+    # Sem reserva aqui: o pacote de 10 kWh por R$ 20 entrega os 10 kWh (os testes de reserva ligam).
+    r = client.patch(f"/api/v1/admin/carregadores/{cp_id}", json={"modo_cobranca": "kwh", "preco_kwh": 2.0, "kwh_reserva_pix": 0}, headers=ADMIN)
     assert r.status_code == 200 and r.json()["modo_cobranca"] == "kwh"
     # Pacote de tempo antigo some do tablet; o de energia aparece.
     client.post(f"/api/v1/admin/carregadores/{cp_id}/pacotes", json={"nome": "30 min", "minutos": 30, "valor": 10}, headers=ADMIN)
@@ -129,12 +130,12 @@ def test_acerto_desconta_do_primeiro_pagamento_e_depois_do_segundo():
 
 def test_maquininha_com_margem_entrega_80_por_cento_e_cobra_pelo_preco(client):
     _carregador_kwh(client, "CP-KWH6")
-    r = client.patch("/api/v1/admin/carregadores/CP-KWH6", json={"kwh_percentual_entrega": 80}, headers=ADMIN)
-    assert r.json()["kwh_percentual_entrega"] == 80
+    r = client.patch("/api/v1/admin/carregadores/CP-KWH6", json={"kwh_reserva_pix": 2}, headers=ADMIN)
+    assert r.json()["kwh_reserva_pix"] == 2
     with client.websocket_connect("/ocpp/CP-KWH6", subprotocols=["ocpp1.6"]) as ws:
         cp = CarregadorFake(ws)
         cp.ligar()
-        # R$ 10 a R$ 2,00/kWh: 5 kWh pagos, para em 4 kWh (80%).
+        # R$ 10 no Pix a R$ 2,00/kWh: R$ 2 de reserva, para em 4 kWh.
         simulado = client.post("/api/v1/admin/carregadores/CP-KWH6/simular-pagamento", json={"valor": 10}, headers=ADMIN).json()
         assert simulado["kwh"] == 4.0
         start = cp.receber_chamada("RemoteStartTransaction")
@@ -153,17 +154,17 @@ def test_maquininha_com_margem_entrega_80_por_cento_e_cobra_pelo_preco(client):
     assert cobranca.valor_consumido == 8.2
     assert cobranca.valor_devolvido == 1.8
 
-    # App: 10 kWh a R$ 2,00 com 80% = Pix de R$ 25 (R$ 20 de energia + margem).
+    # App: 10 kWh a R$ 2,00 = Pix de R$ 22 (R$ 20 de energia + R$ 2 de reserva).
     info = client.get("/api/v1/publico/carregadores/CP-KWH6").json()
-    assert {"kwh": 10, "valor": 25.0} in info["opcoes"] and info["percentual_entrega"] == 80
-    # Tablet: pacote de 10 kWh por R$ 20 para em 8 kWh, cobrado a R$ 2,00.
+    assert {"kwh": 10, "valor": 22.0} in info["opcoes"] and info["reserva_pix"] == 2 and info["reserva_cartao"] == 0.5
+    # Tablet: pacote de 10 kWh por R$ 20 tira R$ 2 de reserva e para em 9 kWh.
     db = SessionLocal()
     try:
         from app.models.carregador import Carregador, PacoteTempo
 
         carregador = db.get(Carregador, "CP-KWH6")
         pacote = PacoteTempo(carregador_id="CP-KWH6", nome="10 kWh", minutos=0, kwh=10, valor=20)
-        assert cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh) == 8.0
+        assert cobranca_kwh.kwh_do_pacote(carregador, pacote.kwh, pacote.valor) == 9.0
     finally:
         db.close()
 

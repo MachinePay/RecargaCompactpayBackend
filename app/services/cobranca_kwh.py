@@ -109,8 +109,10 @@ def teto_minutos(carregador: Carregador) -> int:
     return carregador.kwh_tempo_maximo_min or settings.KWH_TEMPO_MAXIMO_MINUTOS
 
 
-# Pagamento na maquininha que nao e' Pix (cartao): o banco nao devolve parte.
-PERCENTUAL_CARTAO_MAQUINA_PADRAO = 95
+# Reserva fixa somada ao custo da energia (cobre o carro puxar um pouco a
+# mais). Pix: a sobra volta. Cartao: nao tem devolucao, entao a reserva e' pequena.
+RESERVA_PIX_PADRAO = 2.00
+RESERVA_CARTAO_PADRAO = 0.50
 # Vendas feitas numa maquininha (caixa MP, SumUp, Point do tablet). "simulado"
 # e' o teste do painel/bancada.
 ORIGENS_MAQUININHA = ("caixa", "sumup", "point", "simulado")
@@ -123,18 +125,18 @@ def eh_pix(metodo: str | None) -> bool:
     return "pix" in m or m in ("bank_transfer", "simulado")
 
 
-def percentual_entrega(carregador: Carregador) -> int:
-    """% que vira energia no Pix (app e maquininha): o resto e' margem e volta."""
-    return carregador.kwh_percentual_entrega or 100
+def reserva_pix(carregador: Carregador) -> float:
+    """Reserva no Pix (app e maquininha): a sobra volta no proprio Pix."""
+    return RESERVA_PIX_PADRAO if carregador.kwh_reserva_pix is None else carregador.kwh_reserva_pix
 
 
-def percentual_cartao_maquina(carregador: Carregador) -> int:
-    """% que vira energia no cartao da maquininha (sem devolucao)."""
-    return carregador.kwh_percentual_cartao_maquina or PERCENTUAL_CARTAO_MAQUINA_PADRAO
+def reserva_cartao(carregador: Carregador) -> float:
+    """Reserva no cartao (app e maquininha): nao tem devolucao."""
+    return RESERVA_CARTAO_PADRAO if carregador.kwh_reserva_cartao is None else carregador.kwh_reserva_cartao
 
 
-def percentual_da_maquina(carregador: Carregador, metodo: str | None) -> int:
-    return percentual_entrega(carregador) if eh_pix(metodo) else percentual_cartao_maquina(carregador)
+def reserva(carregador: Carregador, metodo: str | None) -> float:
+    return reserva_pix(carregador) if eh_pix(metodo) else reserva_cartao(carregador)
 
 
 def cartao_na_maquina(cobranca: Cobranca | None) -> bool:
@@ -149,33 +151,37 @@ def devolve_no_banco(cobranca: Cobranca) -> bool:
     if cobranca.carteira:
         return False  # cobranca antiga da carteira: a sobra volta para a carteira
     if cobranca.dispositivo_id:
-        return eh_pix(cobranca.metodo)  # app: so o Pix devolve; cartao usa 95% e nao devolve
+        return eh_pix(cobranca.metodo)  # app: so o Pix devolve; cartao nao devolve
     if cobranca.origem in ORIGENS_MAQUININHA:
         return eh_pix(cobranca.metodo)
     return True
 
 
 def kwh_por_valor(carregador: Carregador, valor: float, metodo: str | None = "pix") -> float:
-    """Energia que um valor livre (maquininha) libera. Pix: o % cadastrado
-    (o resto e' margem e volta). Cartao: o % do cartao (padrao 95), sem volta.
-    Arredondada para baixo em 0,01 kWh."""
+    """Energia que um valor livre (maquininha) libera: o valor menos a reserva
+    (Pix R$ 2,00, cartao R$ 0,50) dividido pelo preco. Ex.: R$ 10 no Pix a
+    R$ 2,00/kWh = 4 kWh. Arredondada para baixo em 0,01 kWh."""
     if not carregador.preco_kwh or carregador.preco_kwh <= 0 or valor <= 0:
         return 0.0
-    return int(valor * percentual_da_maquina(carregador, metodo) / 100 / carregador.preco_kwh * 100 + 1e-9) / 100
+    energia = max(0.0, valor - reserva(carregador, metodo))
+    return int(energia / carregador.preco_kwh * 100 + 1e-9) / 100
 
 
 def valor_por_kwh(carregador: Carregador, kwh: float, metodo: str | None = "pix") -> float:
     """Valor a pagar adiantado para levar kwh (app): o custo da energia mais a
-    margem (o inverso de kwh_por_valor). Pix: margem do % cadastrado e a
-    sobra volta. Cartao: margem pequena (95%) e nada volta."""
+    reserva (o inverso de kwh_por_valor)."""
     if not carregador.preco_kwh or kwh <= 0:
         return 0.0
-    return round(kwh * carregador.preco_kwh * 100 / percentual_da_maquina(carregador, metodo), 2)
+    return round(kwh * carregador.preco_kwh + reserva(carregador, metodo), 2)
 
 
-def kwh_do_pacote(carregador: Carregador, kwh_pacote: float) -> float:
-    """Pacote do tablet: o valor do pacote e' o pre-pago; entrega o percentual."""
-    return int(kwh_pacote * percentual_entrega(carregador) + 1e-9) / 100
+def kwh_do_pacote(carregador: Carregador, kwh_pacote: float, valor: float, metodo: str | None = "pix") -> float:
+    """Pacote do tablet: o valor do pacote e' o pre-pago; tira a reserva e o
+    resto vira energia pelo preco do pacote."""
+    if not kwh_pacote or valor <= 0:
+        return 0.0
+    preco = valor / kwh_pacote
+    return int(max(0.0, valor - reserva(carregador, metodo)) / preco * 100 + 1e-9) / 100
 
 
 def medido(sessao: SessaoCarga) -> bool:

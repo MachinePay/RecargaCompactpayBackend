@@ -1,9 +1,9 @@
 """Recarga por kWh pelo app (Pix ou cartao online), sem carteira.
 
-O motorista escolhe os kWh. Pix: cobra o custo da energia mais a margem do
-carregador (ex.: 80% -> 10 kWh a R$ 2,00 cobra R$ 25) e, no fim, devolve a
-sobra no proprio Pix (estorno parcial). Cartao: nao tem devolucao, entao a
-margem e' pequena (95% -> R$ 21,05) e nada volta. Conta no app e' opcional.
+O motorista escolhe os kWh e paga o custo da energia mais uma reserva fixa.
+Pix: reserva de R$ 2,00 (10 kWh a R$ 2,00 = R$ 22) e, no fim, a sobra volta no
+proprio Pix (estorno parcial). Cartao: nao tem devolucao, entao a reserva e'
+de R$ 0,50 (R$ 20,50) e nada volta. Conta no app e' opcional.
 
 Cobrancas antigas da carteira (cobranca.carteira) continuam sendo acertadas
 pela carteira (services/carteira.py); nenhuma nova e' criada.
@@ -53,8 +53,8 @@ def previa(carregador: Carregador, kwh: float) -> dict:
         "kwh": kwh,
         "preco_kwh": carregador.preco_kwh,
         "custo_energia": pix_["custo_energia"],
-        "percentual_pix": cobranca_kwh.percentual_entrega(carregador),
-        "percentual_cartao": cobranca_kwh.percentual_cartao_maquina(carregador),
+        "reserva_pix": cobranca_kwh.reserva_pix(carregador),
+        "reserva_cartao": cobranca_kwh.reserva_cartao(carregador),
         "pix": pix_,
         "cartao": cartao,
         # Compatibilidade: o valor do Pix.

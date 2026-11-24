@@ -149,8 +149,9 @@ def _serializar_carregador(db: Session, carregador: Carregador) -> dict:
         "preco_hora": preco_hora,
         "modo_cobranca": "kwh" if por_kwh else "tempo",
         "preco_kwh": carregador.preco_kwh if por_kwh else None,
-        # Margem: o Pix leva um pouco a mais e o que nao usar volta.
-        "percentual_entrega": cobranca_kwh.percentual_entrega(carregador) if por_kwh else None,
+        # Reserva fixa: Pix (a sobra volta) e cartao (sem devolucao).
+        "reserva_pix": cobranca_kwh.reserva_pix(carregador) if por_kwh else None,
+        "reserva_cartao": cobranca_kwh.reserva_cartao(carregador) if por_kwh else None,
         "corrente_maxima_a": carregador.corrente_maxima_a,
         # Media das ultimas recargas: o app preve tempo (kWh) ou energia (tempo).
         "potencia_media_kw": cobranca_kwh.potencia_media_kw(db, carregador),
